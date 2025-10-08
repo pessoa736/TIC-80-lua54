@@ -3,6 +3,7 @@
 ![TIC-80](https://tic80.com/img/logo64.png)
 **TIC-80 TINY COMPUTER** — [tic80.com](https://tic80.com)
 
+- [Sobre este fork](#sobre-este-fork)
 - [About](#about)
   - [Features](#features)
 - [Binary Downloads](#binary-downloads)
@@ -50,6 +51,16 @@ Games are packaged into a cartridge file, which can be easily distributed. TIC-8
 To make a retro styled game, the whole process of creation and execution takes place under some technical limitations: 240x136 pixel display, 16 color palette, 256 8x8 color sprites, 4 channel sound, etc.
 
 ![TIC-80](https://user-images.githubusercontent.com/1101448/92492270-d6bcbc80-f1fb-11ea-9d2d-468ad015ace2.gif)
+
+## Sobre este fork
+
+Este repositório é um fork do projeto original [nesbox/TIC-80](https://github.com/nesbox/TIC-80). As principais diferenças desta versão são:
+
+- Usa Lua 5.4 no ambiente interno (engine), mantendo a compatibilidade do restante do projeto.
+- Suporte para importar arquivos `.lua` localizados no mesmo diretório do cartucho sendo criado. Esses arquivos são incorporados no processo de build do cart e compilados juntos em uma única build.
+- Mantém respeito total ao projeto original: créditos, licença (MIT) e estrutura base são preservados. Alterações foram feitas de forma mínima e isolada às partes necessárias para habilitar Lua 5.4 e a build unificada de scripts Lua.
+
+Se você procura o projeto original, documentação completa e downloads oficiais, acesse o repositório principal: [nesbox/TIC-80](https://github.com/nesbox/TIC-80).
 
 ### Features
 - Multiple programming languages: [Lua](https://www.lua.org),
