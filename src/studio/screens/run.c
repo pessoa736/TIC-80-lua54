@@ -25,6 +25,12 @@
 #include "studio/fs.h"
 #include "ext/md5.h"
 #include <time.h>
+#if defined(__TIC_WINDOWS__)
+#include <direct.h>
+#define chdir _chdir
+#else
+#include <unistd.h>
+#endif
 
 static void onTrace(void* data, const char* text, u8 color)
 {
@@ -171,6 +177,18 @@ void initRun(Run* run, Console* console, tic_fs* fs, Studio* studio)
     }
 
     tic_sys_preseed();
+
+    // Change process working directory to the current project folder
+    // so that Lua `require` with relative paths resolves to the cart location.
+    {
+        char rel[TICNAME_MAX] = {0};
+        tic_fs_dir(run->fs, rel);
+        const char* abs = tic_fs_pathroot(run->fs, rel);
+        if (abs && strlen(abs))
+        {
+            chdir(abs);
+        }
+    }
 }
 
 void freeRun(Run* run)

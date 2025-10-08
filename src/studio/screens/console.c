@@ -125,6 +125,7 @@
     macro(bank)                 \
     macro(vbank)                \
     macro(id)                   \
+    macro(bundle)               \
     ALONE_KEY(macro)
 
 static const char* WelcomeText =
@@ -2067,7 +2068,126 @@ static void exportSprites(Console* console, const char* filename, tic_tile* base
     }
 }
 
-static void* embedCart(Console* console, u8* app, s32* size)
+// naive Lua require bundler: finds require("foo") or require 'foo'
+// and concatenates files ./foo.lua or ./foo/init.lua before main
+static bool read_text_file(const char* path, char** outBuf, size_t* outLen)
+{
+    s32 sz = 0;
+    void* data = fs_read(path, &sz);
+    if(!data) return false;
+    *outBuf = (char*)malloc(sz+1);
+    if(!*outBuf){ free(data); return false; }
+    memcpy(*outBuf, data, sz);
+    (*outBuf)[sz] = '\0';
+    if(outLen) *outLen = (size_t)sz;
+    free(data);
+    return true;
+}
+
+static void dots_to_slashes(char* s)
+{
+    for(char* p=s; *p; ++p) if(*p=='.') *p='/';
+}
+
+static bool try_read_module(Console* console, const char* mod, char** out, size_t* outLen)
+{
+    // construct relative paths under current FS dir
+    char cwd[TICNAME_MAX];
+    tic_fs_dir(console->fs, cwd);
+    const char* base = tic_fs_pathroot(console->fs, cwd);
+
+    char path1[TICNAME_MAX];
+    char path2[TICNAME_MAX];
+    char modpath[256]; strncpy(modpath, mod, sizeof(modpath)-1); modpath[sizeof(modpath)-1]='\0';
+    dots_to_slashes(modpath);
+    snprintf(path1, sizeof path1, "%s/%s.lua", base, modpath);
+    snprintf(path2, sizeof path2, "%s/%s/init.lua", base, modpath);
+
+    if(read_text_file(path1, out, outLen)) return true;
+    if(read_text_file(path2, out, outLen)) return true;
+    return false;
+}
+
+static void scan_requires_into(Console* console, const char* code, char*** mods, int* modCount, int* modCap, char** bundled, size_t* len, size_t* cap)
+{
+    const char* p = code;
+    while(*p)
+    {
+        const char* r = strstr(p, "require");
+        if(!r) break;
+        r += 7;
+        while(*r==' '||*r=='\t') r++;
+        if(*r=='(') r++;
+        while(*r==' '||*r=='\t') r++;
+        char quote = (*r=='"'||*r=='\'') ? *r : 0;
+        if(!quote){ p = r; continue; }
+        r++;
+        const char* start = r;
+        while(*r && *r!=quote) r++;
+        if(*r!=quote){ p = r; continue; }
+        size_t mlen = (size_t)(r - start);
+        if(mlen==0){ p = r+1; continue; }
+        char mod[256];
+        if(mlen >= sizeof(mod)) mlen = sizeof(mod)-1;
+        memcpy(mod, start, mlen); mod[mlen]='\0';
+
+        bool seen=false;
+        for(int i=0;i<*modCount;i++) if(strcmp((*mods)[i], mod)==0){ seen=true; break; }
+        if(!seen)
+        {
+            char* src=NULL; size_t srclen=0;
+            if(try_read_module(console, mod, &src, &srclen))
+            {
+                if(*modCount >= *modCap)
+                {
+                    *modCap = (*modCap==0)?8:(*modCap*2);
+                    *mods = (char**)realloc(*mods, sizeof(char*) * (*modCap));
+                }
+                (*mods)[(*modCount)++] = strdup(mod);
+
+                const char* headerFmt = "\n-- begin module %s --\npackage.preload['%s']=function(...)\n";
+                const char* footerFmt = "\nend -- end module %s --\n";
+                size_t need = *len + strlen(headerFmt)+strlen(footerFmt)+3*strlen(mod) + srclen + 1;
+                if(need > *cap){ *cap = need*2; *bundled = (char*)realloc(*bundled, *cap); if(!*bundled){ free(src); return; } }
+                *len += sprintf((*bundled)+(*len), headerFmt, mod, mod);
+                memcpy((*bundled)+(*len), src, srclen); *len += srclen; (*bundled)[*len]='\0';
+                *len += sprintf((*bundled)+(*len), footerFmt, mod);
+
+                // recursively scan this module's code
+                scan_requires_into(console, src, mods, modCount, modCap, bundled, len, cap);
+
+                free(src);
+            }
+        }
+        p = r+1;
+    }
+}
+
+static char* bundle_lua_requirements(Console* console, const char* mainCode, size_t* outLen)
+{
+    size_t cap = strlen(mainCode) + 1;
+    char* bundled = (char*)malloc(cap);
+    if(!bundled) return NULL;
+    bundled[0] = '\0';
+    size_t len = 0;
+
+    int modCount = 0, modCap = 0; char** mods = NULL;
+    scan_requires_into(console, mainCode, &mods, &modCount, &modCap, &bundled, &len, &cap);
+
+    size_t mainLen = strlen(mainCode);
+    if(len + mainLen + 2 > cap){ cap = len + mainLen + 2; bundled = (char*)realloc(bundled, cap); if(!bundled) { for(int i=0;i<modCount;i++) free(mods[i]); free(mods); return NULL; } }
+    strcat(bundled, "\n"); len++;
+    memcpy(bundled+len, mainCode, mainLen); len += mainLen; bundled[len]='\0';
+
+    if(outLen) *outLen = len;
+    for(int i=0;i<modCount;i++) free(mods[i]);
+    free(mods);
+    return bundled;
+}
+
+static inline void free_bundled(char* code) { if(code) free(code); }
+
+static void* embedCart(Console* console, u8* app, s32* size, ExportParams params)
 {
     tic_mem* tic = console->tic;
     u8* data = NULL;
@@ -2075,7 +2195,26 @@ static void* embedCart(Console* console, u8* app, s32* size)
 
     SCOPE(free(cart))
     {
-        s32 cartSize = tic_cart_save(&tic->cart, cart);
+        // prepare cart for embedding (optionally bundle Lua deps)
+        tic_cartridge tmp = tic->cart;
+
+        if (params.bundle)
+        {
+            const tic_script* script = tic_get_script(tic);
+            if (script && strcmp(script->name, "lua") == 0)
+            {
+                size_t bundledLen = 0;
+                char* bundled = bundle_lua_requirements(console, tmp.code.data, &bundledLen);
+                if (bundled)
+                {
+                    memset(tmp.code.data, 0, sizeof(tmp.code.data));
+                    strncpy(tmp.code.data, bundled, MIN((size_t)sizeof(tmp.code.data)-1, bundledLen));
+                }
+                free_bundled(bundled);
+            }
+        }
+
+        s32 cartSize = tic_cart_save(&tmp, cart);
 
         s32 zipSize = sizeof(tic_cartridge);
         u8* zipData = (u8*)malloc(zipSize);
@@ -2116,6 +2255,7 @@ typedef struct
 {
     Console* console;
     char filename[TICNAME_MAX];
+    ExportParams params;
 } GameExportData;
 
 static void onExportGet(const net_get_data* data)
@@ -2155,11 +2295,9 @@ static void onNativeExportGet(const net_get_data* data)
         {
             GameExportData* exportData = (GameExportData*)data->calldata;
             Console* console = exportData->console;
-
-            tic_mem* tic = console->tic;
-
             char filename[TICNAME_MAX];
             strcpy(filename, exportData->filename);
+            ExportParams params = exportData->params;
             free(exportData);
 
             s32 size = data->done.size;
@@ -2169,7 +2307,7 @@ static void onNativeExportGet(const net_get_data* data)
             const char* path = tic_fs_path(console->fs, filename);
             void* buf = NULL;
 
-            onFileExported(console, filename, (buf = embedCart(console, data->done.data, &size)) && fs_write(path, buf, size));
+            onFileExported(console, filename, (buf = embedCart(console, data->done.data, &size, params)) && fs_write(path, buf, size));
             chmod(path, DEFAULT_CHMOD);
 
             if (buf)
@@ -2186,6 +2324,7 @@ static void exportGame(Console* console, const char* name, const char* system, n
     tic_mem* tic = console->tic;
     printLine(console);
     GameExportData data = {console};
+    data.params = params;
     strcpy(data.filename, name);
 
     char url[TICNAME_MAX] = "/export/" DEF2STR(TIC_VERSION_MAJOR) "." DEF2STR(TIC_VERSION_MINOR) TIC_VERSION_STATUS "/";
@@ -2232,7 +2371,26 @@ static void onHtmlExportGet(const net_get_data* data)
 
                     SCOPE(free(cart))
                     {
-                        s32 cartSize = tic_cart_save(&tic->cart, cart);
+                        // Optionally bundle Lua dependencies into the cart code
+                        tic_cartridge tmp = tic->cart;
+                        char* bundled = NULL;
+                        size_t bundledLen = 0;
+                        if (exportData->params.bundle)
+                        {
+                            const tic_script* script = tic_get_script(tic);
+                            if (script && strcmp(script->name, "lua") == 0)
+                            {
+                                bundled = bundle_lua_requirements(console, tmp.code.data, &bundledLen);
+                                if (bundled)
+                                {
+                                    memset(tmp.code.data, 0, sizeof(tmp.code.data));
+                                    strncpy(tmp.code.data, bundled, MIN((size_t)sizeof(tmp.code.data)-1, bundledLen));
+                                }
+                            }
+                        }
+
+                        s32 cartSize = tic_cart_save(&tmp, cart);
+                        free_bundled(bundled);
 
                         if(cartSize)
                         {
@@ -2454,7 +2612,6 @@ static void onExportCommand(Console* console)
         };
 
         const char* type = console->desc->params[0].key;
-
         FOR(const struct Handler*, ptr, Handlers)
             if(strcmp(type, ptr->type) == 0)
             {

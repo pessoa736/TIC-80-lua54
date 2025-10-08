@@ -141,7 +141,9 @@ Makefile
 !templates/c/Makefile
 build/android/.gradle/
 build/android/app/.externalNativeBuild/
+build/android/app/.cxx/
 build/android/app/build/
+build/android/local.properties
 build/android/build/
 build/vendor/sdl2/SDL2.spec
 build/vendor/sdl2/include/SDL_config.h
@@ -186,3 +188,6 @@ build/mruby_vendor-prefix/
 # byte battle / test files
 /*.lua
 /*.tic
+.android-local/
+.android_bootstrap/
+.deps/

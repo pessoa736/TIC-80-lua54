@@ -20,14 +20,22 @@ android {
         versionCode 10200
         versionName "1.02.00"
         ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
+            // Build only one ABI to reduce memory pressure during link
+            abiFilters 'arm64-v8a'
         }
         externalNativeBuild {
             ndkBuild {
                 arguments "APP_PLATFORM=android-31"
             }
             cmake {
-                arguments "-DBUILD_WITH_RUBY=OFF", "-DBUILD_PRO=Off", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_WITH_ALL=ON"
+                // Disable IPO/LTO and keep optimization reasonable to avoid OOM in CI/containers
+                arguments "-DBUILD_WITH_RUBY=OFF",
+                          "-DBUILD_PRO=On",
+                          "-DCMAKE_BUILD_TYPE=Release",
+                          "-DBUILD_WITH_ALL=ON",
+                          "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
+                          "-DCMAKE_C_FLAGS_RELEASE=-O2 -fno-lto",
+                          "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -fno-lto"
             }
         }
     }

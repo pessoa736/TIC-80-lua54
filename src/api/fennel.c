@@ -47,6 +47,22 @@ static bool initFennel(tic_mem* tic, const char* code)
     lua_State* lua = core->currentVM = luaL_newstate();
     luaapi_open(lua);
 
+    // Allow local requires from the cart folder
+    {
+        lua_getglobal(lua, "package");
+        if (lua_istable(lua, -1))
+        {
+            lua_getfield(lua, -1, "path");
+            const char* oldpath = lua_tostring(lua, -1);
+            const char* extra = ";./?.lua;./?/init.lua";
+            if (!oldpath) oldpath = "";
+            lua_pop(lua, 1);
+            lua_pushfstring(lua, "%s%s", oldpath, extra);
+            lua_setfield(lua, -2, "path");
+        }
+        lua_pop(lua, 1);
+    }
+
     luaapi_init(core);
 
     {
