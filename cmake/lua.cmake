@@ -64,8 +64,12 @@ if(BUILD_WITH_LUA OR BUILD_WITH_MOON OR BUILD_WITH_FENNEL)
         ${LUA_DIR}/lutf8lib.c
         ${LUA_DIR}/loadlib.c
         ${LUA_DIR}/linit.c
-        ${LUA_DIR}/lbitlib.c
     )
+
+    # Lua 5.2 provided lbitlib.c (bit32); it's absent in 5.3/5.4. Add only if present.
+    if(EXISTS ${LUA_DIR}/lbitlib.c)
+        list(APPEND LUA_SRC ${LUA_DIR}/lbitlib.c)
+    endif()
 
     add_library(luaapi STATIC
         ${LUA_SRC}
