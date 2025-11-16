@@ -1713,7 +1713,7 @@ static bool endsWith(const char* s, const char* suf)
     return ls >= lf && strcmp(s + ls - lf, suf) == 0;
 }
 
-typedef struct InstallRockData { Console* console; tic_fs* fs; const char* rockName; s32 installed; } InstallRockData;
+typedef struct InstallRockData { Console* console; tic_fs* fs; const char* rockName; s32 installed; bool usedLuaSubdir; } InstallRockData;
 
 static bool onInstallRockEnum(const char* name, const char* title, const char* hash, s32 id, void* data, bool dir)
 {
@@ -1761,8 +1761,11 @@ static void onInstallRockEnumDone(void* data)
 {
     InstallRockData* d = (InstallRockData*)data;
     Console* console = d->console;
+
     // restore working dir to original root
-    tic_fs_dirback(d->fs); // back from <name>
+    // If we changed into a lua subdir we need one extra dirback.
+    tic_fs_dirback(d->fs); // back from <name> OR lua
+    if(d->usedLuaSubdir) tic_fs_dirback(d->fs); // back from <name>
     tic_fs_dirback(d->fs); // back from prepared_rocks
 
     if(d->installed == 0)
@@ -1839,8 +1842,75 @@ static void onInstallRockCommand(Console* console)
     printFront(console, name);
     printLine(console);
 
-    InstallRockData data = { console, fs, name, 0 };
+    bool usedLuaSubdir = false;
+    if(tic_fs_isdir(fs, "lua"))
+    {
+        tic_fs_changedir(fs, "lua");
+        usedLuaSubdir = true;
+    }
+
+    InstallRockData data = { console, fs, name, 0, usedLuaSubdir };
     tic_fs_enum(fs, onInstallRockEnum, onInstallRockEnumDone, &data);
+}
+
+// PROJECT <name>
+// Creates a project skeleton: <name>/main.lua, <name>/prepared_rocks, <name>/rocks/share/lua/5.4
+// and switches working directory into <name>.
+static void onProjectCommand(Console* console)
+{
+    if(!console->desc->count)
+    {
+        printBack(console, "\nusage: project <name>");
+        commandDone(console);
+        return;
+    }
+
+    const char* name = console->desc->params->key;
+    for(const char* p = name; *p; p++)
+        if(!(isalnum(*p) || *p=='_' || *p=='-'))
+        {
+            printError(console, "\ninvalid project name");
+            commandDone(console);
+            return;
+        }
+
+    tic_fs* fs = console->fs;
+    if(tic_fs_exists(fs, name))
+    {
+        printError(console, "\nproject already exists");
+        commandDone(console);
+        return;
+    }
+
+    if(tic_fs_makedir(fs, name))
+    {
+        printError(console, "\nfailed to create project dir");
+        commandDone(console);
+        return;
+    }
+
+    tic_fs_changedir(fs, name);
+
+    // subdirs
+    tic_fs_makedir(fs, "prepared_rocks");
+    tic_fs_makedir(fs, "rocks");
+    tic_fs_makedir(fs, "rocks/share");
+    tic_fs_makedir(fs, "rocks/share/lua");
+    tic_fs_makedir(fs, "rocks/share/lua/5.4");
+
+    // template main.lua
+    const char* mainLua = "-- main.lua (project template)\n"\
+                          "-- Use install <rockname> after placing .lua files in prepared_rocks/<rockname>\n"\
+                          "function TIC()\n"\
+                          "  cls()\n"\
+                          "  print('Projeto: " ;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s%s%s", mainLua, name, "',0,0,12)\nend\n");
+    tic_fs_save(fs, "main.lua", buf, strlen(buf), false);
+
+    printBack(console, "\nproject created and entered: ");
+    printFront(console, name);
+    commandDone(console);
 }
 
 static void onGameMenuCommand(Console* console)
@@ -3358,6 +3428,14 @@ static const char HelpUsage[] = "help [<text>"
         "Install pure Lua rock from prepared_rocks/<name> into rocks/share/lua/5.4.",   \
         "install <name>",                                                              \
         onInstallRockCommand,                                                           \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("project",                                                                    \
+        NULL,                                                                           \
+        "Create project skeleton (dirs + main.lua) and enter it.",                     \
+        "project <name>",                                                              \
+        onProjectCommand,                                                               \
         NULL,                                                                           \
         NULL)                                                                           \
                                                                                         \
@@ -4894,6 +4972,19 @@ void initConsole(Console* console, Studio* studio, tic_fs* fs, tic_net* net, Con
     }
 
     console->active = !start->embed;
+
+    // Auto-create LuaRocks related directories on first run if missing
+    // Creates: prepared_rocks and rocks/share/lua/5.4
+    if(!tic_fs_exists(fs, "prepared_rocks"))
+        tic_fs_makedir(fs, "prepared_rocks");
+    if(!tic_fs_exists(fs, "rocks"))
+        tic_fs_makedir(fs, "rocks");
+    if(!tic_fs_exists(fs, "rocks/share"))
+        tic_fs_makedir(fs, "rocks/share");
+    if(!tic_fs_exists(fs, "rocks/share/lua"))
+        tic_fs_makedir(fs, "rocks/share/lua");
+    if(!tic_fs_exists(fs, "rocks/share/lua/5.4"))
+        tic_fs_makedir(fs, "rocks/share/lua/5.4");
 }
 
 void freeConsole(Console* console)

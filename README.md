@@ -42,8 +42,9 @@ Notes:
 
 #### Planned (Not Yet Implemented)
 - Offline installation command now available: `install <name>` (console) copies top-level `.lua` files from `prepared_rocks/<name>/` into `rocks/share/lua/5.4/` without overwriting existing files.
+- Project scaffolding: `project <name>` creates directory structure and starter `main.lua`.
 - Future enhancement: recursive directory copy & manifest for uninstall.
-- Optional manifest for uninstall.
+- Optional manifest for uninstall (expanded tracking for installed rocks).
 - Security hardening: strict relative path checks, deny `..`, only allow `.lua` content.
 
 See demo cart: `demos/luarocksdemo.lua`.
