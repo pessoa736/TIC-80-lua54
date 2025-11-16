@@ -38,21 +38,42 @@ static bool initLua(tic_mem* tic, const char* code)
     lua_State* lua = core->currentVM = luaL_newstate();
     luaapi_open(lua);
 
-    // Ensure local file requires can work: extend package.path with current directory
-    // Patterns cover simple files and module-style directories (init.lua)
+    // Extend package.path to support:
+    //  - Local relative requires (same directory as cart)
+    //  - LuaRocks tree placed at ./rocks (pure Lua modules)
+    // We intentionally do NOT touch package.cpath to avoid native .so loading
+    // inside the sandbox; only pure Lua rocks are supported.
     {
         lua_getglobal(lua, "package");               // stack: package
         if (lua_istable(lua, -1))
         {
             lua_getfield(lua, -1, "path");          // stack: package, package.path
             const char* oldpath = lua_tostring(lua, -1);
-            const char* extra = ";./?.lua;./?/init.lua";
+            // patterns for local files and LuaRocks tree (Lua 5.4)
+            const char* extra = ";./?.lua;./?/init.lua;./rocks/share/lua/5.4/?.lua;./rocks/share/lua/5.4/?/init.lua";
             if (!oldpath) oldpath = "";
             lua_pop(lua, 1);                          // stack: package
             lua_pushfstring(lua, "%s%s", oldpath, extra);
             lua_setfield(lua, -2, "path");
         }
         lua_pop(lua, 1);                               // pop package
+    }
+
+    // Try to activate LuaRocks loader if available (ignore errors silently)
+    {
+        int top = lua_gettop(lua);
+        lua_getglobal(lua, "require");               // stack: require
+        lua_pushstring(lua, "luarocks.loader");
+        if (lua_pcall(lua, 1, 1, 0) != LUA_OK)
+        {
+            // error message on stack; discard and restore
+            lua_settop(lua, top);
+        }
+        else
+        {
+            // result (module table or true) on stack; discard
+            lua_pop(lua, 1);
+        }
     }
 
     luaapi_init(core);

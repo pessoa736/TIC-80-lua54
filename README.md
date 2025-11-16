@@ -10,7 +10,35 @@ Key differences in this fork:
 
 - The engine uses Lua 5.4 while keeping the rest of the project compatible.
 - Support for importing `.lua` files located in the same directory as the cart under development. These files are bundled into the cart during the build process and compiled together into a single build.
+- Optional LuaRocks support for pure Lua modules: place rocks under `./rocks/share/lua/5.4` and they become available to `require`. If the LuaRocks runtime Lua modules are present, `luarocks.loader` is auto-required.
 - Full respect for the original project: credits, MIT license, and base structure are preserved. Changes are minimal and isolated to enable Lua 5.4 and the unified build of Lua scripts.
+
+### LuaRocks Integration (Fork Feature)
+
+You can use [LuaRocks](https://luarocks.org) to manage additional pure-Lua dependencies in your TIC-80 projects.
+
+1. Create a local tree next to the TIC-80 executable (or your working directory):
+  ```bash
+  mkdir -p rocks/share/lua/5.4
+  ```
+2. Install rocks into that tree (outside TIC-80) using a system LuaRocks, pointing the tree to `./rocks`:
+  ```bash
+  luarocks install inspect --tree=./rocks
+  ```
+3. (Optional) Copy the LuaRocks runtime Lua files so that automatic setup works:
+  - From a LuaRocks installation, copy the `luarocks/` directory (pure Lua modules) into `rocks/share/lua/5.4/luarocks/`.
+  - When present, TIC-80 will silently attempt `require('luarocks.loader')` during Lua VM init.
+4. In your cart code you can simply do:
+  ```lua
+  local inspect = require('inspect')
+  ```
+
+Notes:
+- Only pure Lua rocks are supported (no native `.so` / C modules) to preserve the sandbox.
+- Paths added: `./?.lua`, `./?/init.lua`, `./rocks/share/lua/5.4/?.lua`, `./rocks/share/lua/5.4/?/init.lua`.
+- If a rock is not found, normal TIC-80 error reporting applies.
+
+See demo cart: `demos/luarocksdemo.lua`.
 
 If you’re looking for the original project, complete documentation, and official downloads, see the main repository:  [nesbox/TIC-80](https://github.com/nesbox/TIC-80).
 
