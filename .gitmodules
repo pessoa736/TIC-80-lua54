@@ -15,14 +15,6 @@
 	url = https://github.com/lua/lua.git
 	shallow = true
 	branch = master
-[submodule "vendor/squirrel"]
-	path = vendor/squirrel
-	url = https://github.com/albertodemichelis/squirrel.git
-	shallow = true
-[submodule "vendor/wren"]
-	path = vendor/wren
-	url = https://github.com/wren-lang/wren.git
-	shallow = true
 [submodule "vendor/zlib"]
 	path = vendor/zlib
 	url = https://github.com/madler/zlib.git
@@ -30,10 +22,6 @@
 [submodule "vendor/zip"]
 	path = vendor/zip
 	url = https://github.com/kuba--/zip.git
-	shallow = true
-[submodule "vendor/moonscript"]
-	path = vendor/moonscript
-	url = https://github.com/nesbox/moonscript.git
 	shallow = true
 [submodule "vendor/argparse"]
 	path = vendor/argparse
@@ -47,22 +35,6 @@
 	path = vendor/sdl2
 	url = https://github.com/libsdl-org/SDL.git
 	shallow = true
-[submodule "mruby"]
-	path = vendor/mruby
-	url = https://github.com/mruby/mruby.git
-	shallow = true
-[submodule "vendor/wasm3"]
-	path = vendor/wasm3
-	url = https://github.com/wasm3/wasm3.git
-	shallow = true
-[submodule "vendor/janet"]
-	path = vendor/janet
-	url = https://github.com/janet-lang/janet.git
-	shallow = true
-[submodule "vendor/quickjs"]
-	path = vendor/quickjs
-	url = https://github.com/nesbox/quickjs.git
-	shallow = true
 [submodule "vendor/naett"]
 	path = vendor/naett
 	url = https://github.com/erkkah/naett.git
@@ -75,14 +47,4 @@
 	path = vendor/jsmn
 	url = https://github.com/zserge/jsmn.git
 	shallow = true
-[submodule "vendor/sdl-gpu"]
-	path = vendor/sdl-gpu
-	url = https://github.com/aliceisjustplaying/sdl-gpu.git
-	branch = master
-[submodule "vendor/pocketpy"]
-	path = vendor/pocketpy
-	url = https://github.com/pocketpy/pocketpy.git
-	shallow = true
-[submodule "vendor/lpeg"]
-	path = vendor/lpeg
-	url = https://github.com/roberto-ieru/LPeg.git
+

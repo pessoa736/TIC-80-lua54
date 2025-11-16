@@ -48,10 +48,6 @@ if(WIN32)
 endif()
 
 target_include_directories(tic80core
-    PRIVATE
-        ${THIRDPARTY_DIR}/moonscript
-        ${THIRDPARTY_DIR}/fennel
-        ${POCKETPY_DIR}/src
     PUBLIC
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src)

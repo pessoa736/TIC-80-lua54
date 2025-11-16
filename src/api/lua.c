@@ -51,7 +51,11 @@ static bool initLua(tic_mem* tic, const char* code)
             lua_getfield(lua, -1, "path");          // stack: package, package.path
             const char* oldpath = lua_tostring(lua, -1);
             // patterns for local files, LuaRocks tree (Lua 5.4) & vendored stub
-            const char* extra = ";./?.lua;./?/init.lua;./rocks/share/lua/5.4/?.lua;./rocks/share/lua/5.4/?/init.lua;./vendor/luarocks_stub/?.lua;./vendor/luarocks_stub/?/init.lua";
+            // Added versioned layout patterns: <name>/<version>/module.lua and init.lua
+            const char* extra = ";./?.lua;./?/init.lua;"
+                                    "./rocks/share/lua/5.4/?.lua;./rocks/share/lua/5.4/?/init.lua;"
+                                    "./rocks/share/lua/5.4/?/?/?.lua;./rocks/share/lua/5.4/?/?/init.lua;"
+                                    "./vendor/luarocks_stub/?.lua;./vendor/luarocks_stub/?/init.lua";
             if (!oldpath) oldpath = "";
             lua_pop(lua, 1);                          // stack: package
             lua_pushfstring(lua, "%s%s", oldpath, extra);

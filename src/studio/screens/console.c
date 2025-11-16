@@ -1701,6 +1701,135 @@ static void onInstallDemosCommand(Console* console)
 
 // Forward declaration for INSTALL command handler used in COMMANDS_LIST macro
 static void onInstallRockCommand(Console* console);
+static void onRockspecCommand(Console* console);
+static void onSearchRockCommand(Console* console);
+static void onPathCommand(Console* console);
+static void onManifestCommand(Console* console);
+static void onDownloadCommand(Console* console);
+static void onDownloadRockCommand(Console* console);
+// --- DOWNLOAD ROCK (.rock) from luarocks.org ---------------------------------------
+typedef struct DownloadRockCtx { Console* console; char name[64]; char version[64]; tic_net* net; } DownloadRockCtx;
+
+static void onDownloadRockGet(const net_get_data* data)
+{
+    DownloadRockCtx* ctx = (DownloadRockCtx*)data->calldata;
+    Console* console = ctx->console;
+    switch(data->type)
+    {
+    case net_get_progress:
+        printBack(console, ".");
+        break;
+    case net_get_error:
+        printError(console, "\nrock download error code: ");
+        {
+            char num[16]; sprintf(num, "%d", data->error.code); printFront(console, num);
+        }
+        printLine(console);
+        commandDone(console);
+        tic_net_close(ctx->net);
+        free(ctx);
+        break;
+    case net_get_done:
+        {
+            // data->done.data is the .rock (zip). We'll scan entries and extract .lua + .rockspec.
+            // For simplicity, write temporary file then reopen with zip library.
+            tic_fs* fs = console->fs;
+            tic_fs_makedir(fs, "prepared_rocks");
+            tic_fs_changedir(fs, "prepared_rocks");
+            if(!tic_fs_isdir(fs, ctx->name)) tic_fs_makedir(fs, ctx->name);
+            tic_fs_changedir(fs, ctx->name);
+
+            const char* tmpName = "__tmp_download.rock";
+            tic_fs_save(fs, tmpName, data->done.data, data->done.size, false);
+
+            const char* zipPath = tic_fs_path(fs, tmpName);
+            struct zip_t* z = zip_open(zipPath, 0, 'r');
+            if(!z)
+            {
+                printError(console, "\nfailed to open rock archive");
+            }
+            else
+            {
+                int entries = zip_total_entries(z);
+                for(int i = 0; i < entries; i++)
+                {
+                    if(zip_entry_openbyindex(z, i) != 0) continue;
+                    const char* zname = zip_entry_name(z);
+                    size_t zsize = zip_entry_size(z);
+                    if(zsize > 0 && zname)
+                    {
+                        const char* dot = strrchr(zname, '.');
+                        if(dot && (strcmp(dot, ".lua") == 0 || strcmp(dot, ".rockspec") == 0))
+                        {
+                            void* buf = NULL; size_t bufsz = 0;
+                            ssize_t readsz = zip_entry_read(z, &buf, &bufsz);
+                            if(readsz >= 0 && buf && bufsz > 0)
+                            {
+                                // Decide destination
+                                if(strcmp(dot, ".lua") == 0)
+                                {
+                                    if(!tic_fs_isdir(fs, "lua")) tic_fs_makedir(fs, "lua");
+                                    tic_fs_changedir(fs, "lua");
+                                    const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname;
+                                    tic_fs_save(fs, base, buf, (s32)bufsz, false);
+                                    tic_fs_dirback(fs);
+                                }
+                                else // .rockspec
+                                {
+                                    const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname;
+                                    tic_fs_save(fs, base, buf, (s32)bufsz, false);
+                                }
+                            }
+                            if(buf) free(buf);
+                        }
+                    }
+                    zip_entry_close(z);
+                }
+                zip_close(z);
+            }
+            // remove temp
+            tic_fs_delfile(fs, tmpName);
+
+            // restore back to root
+            tic_fs_dirback(fs); // out of <name>
+            tic_fs_dirback(fs); // out of prepared_rocks
+            printBack(console, "\nrock downloaded: "); printFront(console, ctx->name); printFront(console, "-"); printFront(console, ctx->version); printLine(console);
+            printBack(console, "run: install "); printFront(console, ctx->name); printBack(console, " to install");
+            commandDone(console);
+            tic_net_close(ctx->net);
+            free(ctx);
+        }
+        break;
+    }
+}
+
+static void onDownloadRockCommand(Console* console)
+{
+    if(console->desc->count < 2)
+    {
+        printBack(console, "\nusage: downloadrock <name> <version>");
+        commandDone(console);
+        return;
+    }
+    const char* name = console->desc->params->key;
+    const char* version = console->desc->params[1].key; // second positional param
+    // basic validation
+    for(const char* p=name; *p; p++) if(!(isalnum(*p)||*p=='_'||*p=='-')) { printError(console, "\ninvalid name"); commandDone(console); return; }
+    for(const char* p=version; *p; p++) if(!(isalnum(*p)||*p=='_'||*p=='-'||*p=='.')) { printError(console, "\ninvalid version"); commandDone(console); return; }
+
+    // construct URL path for luarocks.org (assumes file pattern name-version.rock)
+    char path[TICNAME_MAX]; snprintf(path, sizeof path, "/%s-%s.rock", name, version);
+    printBack(console, "\ndownloading rock "); printFront(console, name); printFront(console, "-"); printFront(console, version); printBack(console, " ...");
+
+    DownloadRockCtx* ctx = malloc(sizeof *ctx);
+    memset(ctx, 0, sizeof *ctx);
+    ctx->console = console;
+    strncpy(ctx->name, name, sizeof ctx->name - 1);
+    strncpy(ctx->version, version, sizeof ctx->version - 1);
+    ctx->net = tic_net_create("https://luarocks.org");
+    if(!ctx->net){ printError(console, "\nnetwork init failed"); free(ctx); commandDone(console); return; }
+    tic_net_get(ctx->net, path, onDownloadRockGet, ctx);
+}
 
 // INSTALL <name>
 // Copies all top-level .lua files from prepared_rocks/<name> into
@@ -1713,7 +1842,217 @@ static bool endsWith(const char* s, const char* suf)
     return ls >= lf && strcmp(s + ls - lf, suf) == 0;
 }
 
-typedef struct InstallRockData { Console* console; tic_fs* fs; const char* rockName; s32 installed; bool usedLuaSubdir; } InstallRockData;
+typedef struct InstallRockData { Console* console; tic_fs* fs; const char* rockName; const char* version; s32 installed; bool usedLuaSubdir; bool startedInPreparedRoot; char base[TICNAME_MAX]; } InstallRockData;
+
+// --- ROCKSPEC PARSER HELPERS -------------------------------------------------------
+typedef struct ParsedRockspec {
+    char package[64];
+    char version[64];
+    int depCount;
+    char deps[16][64];
+} ParsedRockspec;
+
+static void trim(char* s){
+    char* p=s; while(*p && (*p==' '||*p=='\t' || *p=='\n' || *p=='\r')) p++; if(p!=s) memmove(s,p,strlen(p)+1);
+    size_t len=strlen(s); while(len>0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n'||s[len-1]=='\r')){s[--len]=0;} }
+
+static void unquote(char* s){ trim(s); size_t l=strlen(s); if(l>=2 && ((s[0]=='"' && s[l-1]=='"') || (s[0]=='\'' && s[l-1]=='\''))){ s[l-1]=0; memmove(s,s+1,l-1); } }
+
+static bool parse_rockspec(const char* data, ParsedRockspec* out){
+    if(!data||!out) return false; memset(out,0,sizeof(*out));
+    const char* pkg=strstr(data,"package"); if(pkg){ const char* eq=strchr(pkg,'='); if(eq){ eq++; while(*eq && (*eq==' '||*eq=='\t')) eq++; const char* end=strchr(eq,'\n'); if(!end) end=eq+strlen(eq); size_t len=(size_t)(end-eq); if(len>63) len=63; strncpy(out->package,eq,len); out->package[len]=0; trim(out->package); if(out->package[0]=='\"'){ unquote(out->package);} }}
+    const char* ver=strstr(data,"version"); if(ver){ const char* eq=strchr(ver,'='); if(eq){ eq++; while(*eq && (*eq==' '||*eq=='\t')) eq++; const char* end=strchr(eq,'\n'); if(!end) end=eq+strlen(eq); size_t len=(size_t)(end-eq); if(len>63) len=63; strncpy(out->version,eq,len); out->version[len]=0; trim(out->version); if(out->version[0]=='\"'){ unquote(out->version);} }}
+    const char* deps=strstr(data,"dependencies"); if(deps){ const char* lb=strchr(deps,'{'); const char* rb=strchr(deps,'}'); if(lb&&rb&&rb>lb){ char buf[512]; size_t len=(size_t)(rb-lb-1); if(len>sizeof(buf)-1) len=sizeof(buf)-1; strncpy(buf,lb+1,len); buf[len]=0; // split
+        char* token=strtok(buf,",\n"); while(token && out->depCount<16){ trim(token); if(token[0]=='\"' || token[0]=='\''){ unquote(token);} strncpy(out->deps[out->depCount],token,63); out->deps[out->depCount][63]=0; out->depCount++; token=strtok(NULL,",\n"); }
+    }}
+    return out->package[0]!=0; }
+
+static void printParsedRockspec(Console* console, const ParsedRockspec* p){
+    printBack(console,"\nrockspec:"); printLine(console);
+    if(!p->package[0]){ printError(console,"invalid or unsupported rockspec"); printLine(console); return; }
+    printBack(console," package: "); printFront(console,p->package); printLine(console);
+    if(p->version[0]){ printBack(console," version: "); printFront(console,p->version); printLine(console); }
+    if(p->depCount){ printBack(console," dependencies:"); printLine(console); for(int i=0;i<p->depCount;i++){ printBack(console,"  - "); printFront(console,p->deps[i]); printLine(console);} }
+}
+
+// --- COMMAND: rockspec -------------------------------------------------------------
+static bool enumFindRockspec(const char* name,const char* title,const char* hash,s32 id,void* data,bool dir){
+    if(dir) return true; if(strstr(name,".rockspec")){ char* out=(char*)data; strncpy(out,name,TICNAME_MAX-1); out[TICNAME_MAX-1]=0; return false; } return true; }
+
+static void enumFindRockspecDone(void* data) { /* no-op */ }
+
+static void onRockspecCommand(Console* console){
+    if(!console->desc->count){ printBack(console,"\nusage: rockspec <name>"); commandDone(console); return; }
+    const char* rock=console->desc->params->key; tic_fs* fs=console->fs;
+    // Navigate similar to install logic but simpler: look for prepared_rocks/<rock>
+    bool fromInside=false; const char* cwd=tic_fs_path(fs,""); if(cwd && (endsWith(cwd,"/prepared_rocks")||strcmp(cwd,"prepared_rocks")==0)) fromInside=true;
+    if(!fromInside){ if(!tic_fs_isdir(fs,"prepared_rocks")){ printError(console,"\nprepared_rocks missing"); commandDone(console); return; } tic_fs_changedir(fs,"prepared_rocks"); }
+    if(!tic_fs_isdir(fs,rock)){ printError(console,"\nrock not found"); if(!fromInside) tic_fs_dirback(fs); commandDone(console); return; }
+    tic_fs_changedir(fs,rock);
+    char found[TICNAME_MAX]={0}; tic_fs_enum(fs,enumFindRockspec, enumFindRockspecDone, found);
+    if(!found[0]){ printError(console,"\nno .rockspec file found"); tic_fs_dirback(fs); if(!fromInside) tic_fs_dirback(fs); commandDone(console); return; }
+    s32 size=0; void* buffer=tic_fs_load(fs,found,&size); ParsedRockspec parsed; if(buffer && size>0 && parse_rockspec((const char*)buffer,&parsed)) printParsedRockspec(console,&parsed); else { printError(console,"\nfailed to parse rockspec"); }
+    free(buffer);
+    tic_fs_dirback(fs); if(!fromInside) tic_fs_dirback(fs);
+    commandDone(console);
+}
+
+// --- COMMAND: search ---------------------------------------------------------------
+typedef struct SearchData { Console* console; const char* pattern; int count; } SearchData;
+static bool enumSearch(const char* name,const char* title,const char* hash,s32 id,void* data,bool dir){ SearchData* sd=(SearchData*)data; if(dir){ if(strstr(name,sd->pattern)){ printFront(sd->console," "); printFront(sd->console,name); } sd->count++; } return true; }
+static void enumSearchDone(void* data){ SearchData* sd=(SearchData*)data; if(sd->count==0) printError(sd->console,"\nno matches"); else printLine(sd->console); commandDone(sd->console); }
+static void onSearchRockCommand(Console* console){ if(!console->desc->count){ printBack(console,"\nusage: search <pattern>"); commandDone(console); return; } const char* pattern=console->desc->params->key; tic_fs* fs=console->fs; if(!tic_fs_isdir(fs,"prepared_rocks")){ printError(console,"\nprepared_rocks missing"); commandDone(console); return; } tic_fs_changedir(fs,"prepared_rocks"); printBack(console,"\nrocks:"); SearchData sd={console,pattern,0}; tic_fs_enum(fs,enumSearch,enumSearchDone,&sd); }
+
+// --- COMMAND: path -----------------------------------------------------------------
+static void onPathCommand(Console* console){
+    // Stub implementation (no direct VM access here). Suggest using eval for now.
+    printBack(console, "\npackage.path (use: eval trace(package.path))");
+    commandDone(console);
+}
+
+// manifest command implementation
+static void onManifestCommand(Console* console)
+{
+    tic_fs* fs = console->fs;
+    if(!tic_fs_exists(fs, "rocks/manifest.txt"))
+    {
+        printError(console, "\nno manifest (install something first)");
+        commandDone(console);
+        return;
+    }
+    s32 size=0; void* buf=tic_fs_load(fs, "rocks/manifest.txt", &size);
+    if(!buf||size<=0){ printError(console, "\nfailed to read manifest"); commandDone(console); return; }
+    printBack(console, "\ninstalled rocks:"); printLine(console);
+    char* text=(char*)buf; text[size]=0; // ensure null terminator maybe
+    // iterate lines
+    char* saveptr=NULL; char* line=strtok_r(text, "\n", &saveptr);
+    while(line)
+    {
+        if(*line)
+        {
+            // format name|version|deps
+            char* first=strchr(line,'|'); char* second= first? strchr(first+1,'|'):NULL;
+            if(first && second)
+            {
+                *first='\0'; *second='\0';
+                const char* name=line; const char* version=first+1; const char* deps=second+1;
+                printFront(console, " - "); printFront(console, name); printFront(console, " @ "); printFront(console, version);
+                if(*deps) { printFront(console, " (deps: "); printFront(console, deps); printFront(console, ")"); }
+                printLine(console);
+            }
+        }
+        line=strtok_r(NULL, "\n", &saveptr);
+    }
+    free(buf);
+    commandDone(console);
+}
+
+typedef struct DownloadRockData { Console* console; char rock[TICNAME_MAX]; char filename[TICNAME_MAX]; enum {DL_LUA, DL_ROCKSPEC, DL_ZIP, DL_UNKNOWN} type; } DownloadRockData;
+
+static void onDownloadGet(const net_get_data* data)
+{
+    DownloadRockData* d = (DownloadRockData*)data->calldata;
+    Console* console = d->console;
+    switch(data->type)
+    {
+    case net_get_progress:
+        // lightweight progress indicator
+        printBack(console, ".");
+        break;
+    case net_get_error:
+        printError(console, "\n download error code: ");
+        {
+            char num[16]; sprintf(num, "%d", data->error.code); printFront(console, num);
+        }
+        commandDone(console); free(d);
+        break;
+    case net_get_done:
+        {
+            // ensure prepared_rocks tree
+            tic_fs* fs = console->fs;
+            tic_fs_makedir(fs, "prepared_rocks");
+            // rock root
+            tic_fs_changedir(fs, "prepared_rocks");
+            if(!tic_fs_isdir(fs, d->rock)) tic_fs_makedir(fs, d->rock);
+            tic_fs_changedir(fs, d->rock);
+            if(d->type == DL_LUA)
+            {
+                if(!tic_fs_isdir(fs, "lua")) tic_fs_makedir(fs, "lua");
+                tic_fs_changedir(fs, "lua");
+                if(!tic_fs_save(fs, d->filename, data->done.data, data->done.size, false))
+                    printError(console, "\nfailed saving lua file");
+                else
+                {
+                    printBack(console, "\n downloaded lua -> prepared_rocks/"); printFront(console, d->rock); printFront(console, "/lua/"); printFront(console, d->filename);
+                    printLine(console);
+                }
+                tic_fs_dirback(fs); // out of lua
+            }
+            else if(d->type == DL_ROCKSPEC)
+            {
+                if(!tic_fs_save(fs, d->filename, data->done.data, data->done.size, false))
+                    printError(console, "\nfailed saving rockspec");
+                else
+                {
+                    printBack(console, "\n downloaded rockspec -> prepared_rocks/"); printFront(console, d->rock); printFront(console, "/"); printFront(console, d->filename); printLine(console);
+                }
+            }
+            else if(d->type == DL_ZIP)
+            {
+                printError(console, "\n.zip download not yet supported (future: auto-unzip)" );
+            }
+            else
+            {
+                printError(console, "\nunknown file type, ignored" );
+            }
+            // restore to root
+            tic_fs_dirback(fs); // out of <rock>
+            tic_fs_dirback(fs); // out of prepared_rocks
+            printBack(console, "\nrun: install "); printFront(console, d->rock); printBack(console, " to install");
+            commandDone(console);
+            free(d);
+        }
+        break;
+    }
+}
+
+// Extract relative path from full URL. Returns pointer to path segment (starting with '/').
+static const char* extract_relative_path(const char* url)
+{
+    const char* p = strstr(url, "://"); if(!p) return url; p += 3; // skip scheme
+    const char* slash = strchr(p, '/'); return slash? slash : "/"; }
+
+static void onDownloadCommand(Console* console)
+{
+    if(!console->desc->count){ printBack(console, "\nusage: download <url>"); commandDone(console); return; }
+    const char* url = console->desc->params->key;
+    if(!(strstr(url, "http://")==url || strstr(url, "https://")==url))
+    { printError(console, "\nurl must start with http:// or https://"); commandDone(console); return; }
+
+    // Determine file type by extension
+    const char* lastSlash = strrchr(url, '/'); const char* fname = lastSlash? lastSlash+1 : url;
+    if(strlen(fname)==0){ printError(console, "\nurl missing filename"); commandDone(console); return; }
+    DownloadRockData* d = malloc(sizeof *d); memset(d,0,sizeof *d); d->console = console;
+    // derive rock name (base without extension for lua; for rockspec parse later) but we need a placeholder
+    const char* dot = strrchr(fname, '.');
+    char base[64]; memset(base,0,sizeof base);
+    if(dot){ size_t blen = (size_t)(dot - fname); if(blen > sizeof(base)-1) blen=sizeof(base)-1; strncpy(base, fname, blen); }
+    else { strncpy(base, fname, sizeof(base)-1); }
+    // sanitize base
+    for(char* c=base; *c; c++){ if(!(isalnum(*c)||*c=='_'||*c=='-')) *c='_'; }
+
+    if(dot && strcmp(dot, ".lua")==0) d->type = DL_LUA; else if(dot && strcmp(dot, ".rockspec")==0) d->type = DL_ROCKSPEC; else if(dot && strcmp(dot, ".zip")==0) d->type = DL_ZIP; else d->type = DL_UNKNOWN;
+    strncpy(d->rock, base, sizeof d->rock -1);
+    strncpy(d->filename, fname, sizeof d->filename -1);
+
+    if(d->type == DL_UNKNOWN){ printError(console, "\nunsupported extension (only .lua, .rockspec, .zip)" ); free(d); commandDone(console); return; }
+
+    // Only same-host downloads supported: we strip scheme/host to relative path
+    const char* rel = extract_relative_path(url);
+    if(*rel != '/') { printError(console, "\nfailed to derive relative path"); free(d); commandDone(console); return; }
+    printBack(console, "\ndownloading "); printFront(console, d->filename); printBack(console, " ...");
+    tic_net_get(console->net, rel, onDownloadGet, d);
+}
 
 static bool onInstallRockEnum(const char* name, const char* title, const char* hash, s32 id, void* data, bool dir)
 {
@@ -1721,7 +2060,7 @@ static bool onInstallRockEnum(const char* name, const char* title, const char* h
     Console* console = d->console;
     tic_fs* fs = d->fs;
 
-    if(dir) return true; // skip subdirectories for now
+    if(dir) return true; // skip nested directories for now
 
     if(!endsWith(name, ".lua")) return true; // only .lua
 
@@ -1730,7 +2069,8 @@ static bool onInstallRockEnum(const char* name, const char* title, const char* h
     if(buffer && size > 0)
     {
         char target[TICNAME_MAX];
-        snprintf(target, sizeof target, "rocks/share/lua/5.4/%s", name);
+        // versioned destination: rocks/share/lua/5.4/<rock>/<version>/file.lua
+        snprintf(target, sizeof target, "%s/%s", d->base, name);
 
         if(tic_fs_exists(fs, target))
         {
@@ -1763,10 +2103,9 @@ static void onInstallRockEnumDone(void* data)
     Console* console = d->console;
 
     // restore working dir to original root
-    // If we changed into a lua subdir we need one extra dirback.
-    tic_fs_dirback(d->fs); // back from <name> OR lua
-    if(d->usedLuaSubdir) tic_fs_dirback(d->fs); // back from <name>
-    tic_fs_dirback(d->fs); // back from prepared_rocks
+    tic_fs_dirback(d->fs); // from <name> OR lua
+    if(d->usedLuaSubdir) tic_fs_dirback(d->fs); // from <name>
+    if(!d->startedInPreparedRoot) tic_fs_dirback(d->fs); // from prepared_rocks
 
     if(d->installed == 0)
         printError(console, "\nno .lua files installed");
@@ -1777,6 +2116,53 @@ static void onInstallRockEnumDone(void* data)
         printBack(console, msg);
     }
     commandDone(console);
+}
+
+// Helper: read first .rockspec in current (rock) dir to extract version and dependencies
+static bool read_rockspec_info(tic_fs* fs, char* outVersion, size_t vcap, char deps[][64], int* depCount)
+{
+    char found[TICNAME_MAX] = {0};
+    // find .rockspec
+    tic_fs_enum(fs, enumFindRockspec, enumFindRockspecDone, found);
+    if(!found[0]) return false;
+    s32 size=0; void* buf=tic_fs_load(fs, found, &size);
+    if(!buf || size<=0) { free(buf); return false; }
+    ParsedRockspec parsed; if(!parse_rockspec((const char*)buf,&parsed)) { free(buf); return false; }
+    if(parsed.version[0]) { strncpy(outVersion, parsed.version, vcap-1); outVersion[vcap-1]=0; }
+    if(depCount) *depCount=0;
+    if(depCount){ for(int i=0;i<parsed.depCount && i<16;i++){ strncpy(deps[i], parsed.deps[i], 63); deps[i][63]=0; (*depCount)++; } }
+    free(buf);
+    return true;
+}
+
+// Manifest file format (simple): each line: name|version|dep1,dep2,...
+static bool manifest_load(tic_fs* fs, char** outText)
+{
+    if(!tic_fs_exists(fs, "rocks/manifest.txt")) return false;
+    s32 size=0; void* buf=tic_fs_load(fs, "rocks/manifest.txt", &size);
+    if(!buf||size<=0) { free(buf); return false; }
+    *outText = malloc(size+1); memcpy(*outText, buf, size); (*outText)[size]=0; free(buf); return true;
+}
+static bool manifest_has(const char* text, const char* name)
+{
+    if(!text) return false; char pattern[128]; snprintf(pattern,sizeof pattern, "\n%s|", name); return strstr(text, pattern)!=NULL || (strncmp(text, name, strlen(name))==0 && text[strlen(name)]=='|');
+}
+static void manifest_append(tic_fs* fs, const char* name, const char* version, char deps[][64], int depCount)
+{
+    // ensure rocks dir exists
+    tic_fs_makedir(fs, "rocks");
+    char line[512]; line[0]=0;
+    char depsJoined[256]; depsJoined[0]=0;
+    for(int i=0;i<depCount;i++){ if(i) strncat(depsJoined,",",sizeof(depsJoined)-strlen(depsJoined)-1); strncat(depsJoined,deps[i],sizeof(depsJoined)-strlen(depsJoined)-1); }
+    snprintf(line,sizeof line, "%s|%s|%s\n", name, version && *version?version:"unknown", depsJoined);
+    // append (load existing, then save combined)
+    s32 oldSize=0; void* old=tic_fs_load(fs, "rocks/manifest.txt", &oldSize);
+    size_t newSize = (old?oldSize:0) + strlen(line);
+    char* combined = malloc(newSize+1); combined[0]=0;
+    if(old){ memcpy(combined, old, oldSize); combined[oldSize]=0; }
+    strncat(combined, line, newSize+1 - strlen(combined) -1);
+    tic_fs_save(fs, "rocks/manifest.txt", combined, (s32)strlen(combined), false);
+    free(old); free(combined);
 }
 
 static void onInstallRockCommand(Console* console)
@@ -1808,7 +2194,32 @@ static void onInstallRockCommand(Console* console)
 
     tic_fs* fs = console->fs;
 
-    if(!tic_fs_exists(fs, "prepared_rocks"))
+    const char* cwd = tic_fs_path(fs, "");
+    bool cwdIsPreparedRoot = false;
+    bool cwdIsRockRoot = false;
+
+    // Detect if we're inside prepared_rocks or prepared_rocks/<name>
+    if(cwd && *cwd)
+    {
+        // simplistic suffix tests
+        if(endsWith(cwd, "/prepared_rocks")) cwdIsPreparedRoot = true;
+        else if(strcmp(cwd, "prepared_rocks") == 0) cwdIsPreparedRoot = true;
+        else
+        {
+            // look for /prepared_rocks/<name>
+            size_t len = strlen(cwd);
+            const char* pr = strstr(cwd, "prepared_rocks/");
+            if(pr && endsWith(cwd, name) && pr + strlen("prepared_rocks/") < cwd + len)
+            {
+                // last component equals name
+                const char* lastSlash = strrchr(cwd, '/');
+                if(lastSlash && strcmp(lastSlash+1, name)==0) cwdIsRockRoot = true;
+            }
+        }
+    }
+
+    bool preparedExists = tic_fs_exists(fs, "prepared_rocks");
+    if(!preparedExists && !cwdIsPreparedRoot && !cwdIsRockRoot)
     {
         printError(console, "\nprepared_rocks directory missing");
         commandDone(console);
@@ -1826,31 +2237,76 @@ static void onInstallRockCommand(Console* console)
             return;
         }
     }
-
-    // navigate into prepared_rocks/<name>
-    tic_fs_changedir(fs, "prepared_rocks");
-    if(!tic_fs_isdir(fs, name))
+    bool startedInPreparedRoot = false;
+    if(cwdIsRockRoot)
     {
-        printError(console, "\nrock not found under prepared_rocks");
-        tic_fs_dirback(fs);
-        commandDone(console);
-        return;
+        // already inside prepared_rocks/<name>
+        startedInPreparedRoot = true; // treat as if we entered prepared_rocks (skip extra dirback later)
     }
-    tic_fs_changedir(fs, name);
+    else if(cwdIsPreparedRoot)
+    {
+        // we are in prepared_rocks; just enter <name>
+        if(!tic_fs_isdir(fs, name))
+        {
+            printError(console, "\nrock not found under prepared_rocks");
+            commandDone(console);
+            return;
+        }
+        tic_fs_changedir(fs, name);
+        startedInPreparedRoot = true;
+    }
+    else
+    {
+        // navigate into prepared_rocks/<name> from project root
+        tic_fs_changedir(fs, "prepared_rocks");
+        if(!tic_fs_isdir(fs, name))
+        {
+            printError(console, "\nrock not found under prepared_rocks");
+            tic_fs_dirback(fs);
+            commandDone(console);
+            return;
+        }
+        tic_fs_changedir(fs, name);
+    }
 
     printBack(console, "\ninstalling rock: ");
     printFront(console, name);
     printLine(console);
 
-    bool usedLuaSubdir = false;
-    if(tic_fs_isdir(fs, "lua"))
-    {
-        tic_fs_changedir(fs, "lua");
-        usedLuaSubdir = true;
-    }
+    // parse version & dependencies from rockspec if present
+    char version[64]=""; char deps[16][64]; int depCount=0; memset(deps,0,sizeof deps);
+    read_rockspec_info(fs, version, sizeof version, deps, &depCount);
 
-    InstallRockData data = { console, fs, name, 0, usedLuaSubdir };
+    // dependency check (simple): ensure each dep already listed in manifest
+    char* manifestText=NULL; manifest_load(console->fs, &manifestText);
+    for(int i=0;i<depCount;i++)
+    {
+        if(!manifest_has(manifestText, deps[i]))
+        {
+            printError(console, "missing dep: "); printFront(console, deps[i]); printLine(console);
+            // continue but warn
+        }
+    }
+    free(manifestText);
+
+    bool usedLuaSubdir = false;
+    if(tic_fs_isdir(fs, "lua")) { tic_fs_changedir(fs, "lua"); usedLuaSubdir = true; }
+
+    // build base destination path rocks/share/lua/5.4/<name>/<version>
+    char base[TICNAME_MAX]; snprintf(base, sizeof base, "rocks/share/lua/5.4/%s/%s", name, *version?version:"unknown");
+    // ensure directory chain
+    tic_fs_makedir(console->fs, "rocks");
+    tic_fs_makedir(console->fs, "rocks/share");
+    tic_fs_makedir(console->fs, "rocks/share/lua");
+    tic_fs_makedir(console->fs, "rocks/share/lua/5.4");
+    tic_fs_makedir(console->fs, base);
+
+    InstallRockData data = { console, fs, name, version, 0, usedLuaSubdir, startedInPreparedRoot, {0} };
+    strncpy(data.base, base, sizeof data.base -1);
     tic_fs_enum(fs, onInstallRockEnum, onInstallRockEnumDone, &data);
+
+    // update manifest after installation
+    manifest_append(console->fs, name, version, deps, depCount);
 }
 
 // PROJECT <name>
@@ -3428,6 +3884,54 @@ static const char HelpUsage[] = "help [<text>"
         "Install pure Lua rock from prepared_rocks/<name> into rocks/share/lua/5.4.",   \
         "install <name>",                                                              \
         onInstallRockCommand,                                                           \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("manifest",                                                                  \
+        NULL,                                                                           \
+        "Show installed rocks from manifest.txt.",                                    \
+        "manifest",                                                                    \
+        onManifestCommand,                                                              \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("download",                                                                  \
+        NULL,                                                                           \
+        "Download remote .lua/.rockspec into prepared_rocks (same host only).",        \
+        "download <url>",                                                              \
+        onDownloadCommand,                                                              \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("downloadrock",                                                              \
+        NULL,                                                                           \
+        "Fetch <name>-<version>.rock from luarocks.org and unpack pure Lua files.",    \
+        "downloadrock <name> <version>",                                               \
+        onDownloadRockCommand,                                                          \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("rockspec",                                                                  \
+        NULL,                                                                           \
+        "Show parsed info from <name>.rockspec (package, version, dependencies).",     \
+        "rockspec <name>",                                                             \
+        onRockspecCommand,                                                              \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("search",                                                                    \
+        NULL,                                                                           \
+        "List prepared_rocks entries matching substring.",                            \
+        "search <pattern>",                                                            \
+        onSearchRockCommand,                                                            \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("path",                                                                      \
+        NULL,                                                                           \
+        "Print current Lua package.path.",                                             \
+        "path",                                                                        \
+        onPathCommand,                                                                  \
         NULL,                                                                           \
         NULL)                                                                           \
                                                                                         \
