@@ -37,6 +37,14 @@ Notes:
 - Only pure Lua rocks are supported (no native `.so` / C modules) to preserve the sandbox.
 - Paths added: `./?.lua`, `./?/init.lua`, `./rocks/share/lua/5.4/?.lua`, `./rocks/share/lua/5.4/?/init.lua`.
 - If a rock is not found, normal TIC-80 error reporting applies.
+- Embedded stub: a minimal `luarocks.loader` is vendored under `vendor/luarocks_stub/` so `require('luarocks.loader')` never hard-fails even without copying the full runtime. It does NOT implement install/search logic.
+- Installer stub `tic_luarocks.lua` documents the future offline API but real installation from inside TIC-80 is currently disabled (no file I/O or rockspec parsing yet).
+
+#### Planned (Not Yet Implemented)
+- Offline installation command now available: `install <name>` (console) copies top-level `.lua` files from `prepared_rocks/<name>/` into `rocks/share/lua/5.4/` without overwriting existing files.
+- Future enhancement: recursive directory copy & manifest for uninstall.
+- Optional manifest for uninstall.
+- Security hardening: strict relative path checks, deny `..`, only allow `.lua` content.
 
 See demo cart: `demos/luarocksdemo.lua`.
 

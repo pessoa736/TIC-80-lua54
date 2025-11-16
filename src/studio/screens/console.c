@@ -26,6 +26,7 @@
 #include "studio/fs.h"
 #include "studio/net.h"
 #include "studio/config.h"
+#include "studio/system.h" // ensure version/copyright macros available
 #include "ext/png.h"
 #include "ext/json.h"
 #include "zip.h"
@@ -1698,6 +1699,150 @@ static void onInstallDemosCommand(Console* console)
     commandDone(console);
 }
 
+// Forward declaration for INSTALL command handler used in COMMANDS_LIST macro
+static void onInstallRockCommand(Console* console);
+
+// INSTALL <name>
+// Copies all top-level .lua files from prepared_rocks/<name> into
+// rocks/share/lua/5.4/ without overwriting existing files.
+// Security: <name> must be [A-Za-z0-9_-]+ and no path traversal.
+static bool endsWith(const char* s, const char* suf)
+{
+    if(!s || !suf) return false;
+    size_t ls = strlen(s); size_t lf = strlen(suf);
+    return ls >= lf && strcmp(s + ls - lf, suf) == 0;
+}
+
+typedef struct InstallRockData { Console* console; tic_fs* fs; const char* rockName; s32 installed; } InstallRockData;
+
+static bool onInstallRockEnum(const char* name, const char* title, const char* hash, s32 id, void* data, bool dir)
+{
+    InstallRockData* d = (InstallRockData*)data;
+    Console* console = d->console;
+    tic_fs* fs = d->fs;
+
+    if(dir) return true; // skip subdirectories for now
+
+    if(!endsWith(name, ".lua")) return true; // only .lua
+
+    s32 size = 0;
+    void* buffer = tic_fs_load(fs, name, &size);
+    if(buffer && size > 0)
+    {
+        char target[TICNAME_MAX];
+        snprintf(target, sizeof target, "rocks/share/lua/5.4/%s", name);
+
+        if(tic_fs_exists(fs, target))
+        {
+            // do not overwrite, just note
+            printBack(console, "existing: ");
+            printFront(console, name);
+            printLine(console);
+        }
+        else if(tic_fs_save(fs, target, buffer, size, false))
+        {
+            printBack(console, "installed: ");
+            printFront(console, name);
+            printLine(console);
+            d->installed++;
+        }
+        else
+        {
+            printBack(console, "error saving: ");
+            printError(console, name);
+            printLine(console);
+        }
+    }
+    free(buffer);
+    return true;
+}
+
+static void onInstallRockEnumDone(void* data)
+{
+    InstallRockData* d = (InstallRockData*)data;
+    Console* console = d->console;
+    // restore working dir to original root
+    tic_fs_dirback(d->fs); // back from <name>
+    tic_fs_dirback(d->fs); // back from prepared_rocks
+
+    if(d->installed == 0)
+        printError(console, "\nno .lua files installed");
+    else
+    {
+        char msg[64];
+        snprintf(msg, sizeof msg, "\n%d file(s) installed", d->installed);
+        printBack(console, msg);
+    }
+    commandDone(console);
+}
+
+static void onInstallRockCommand(Console* console)
+{
+    if(!console->desc->count)
+    {
+        printBack(console, "\nusage: install <name>");
+        commandDone(console);
+        return;
+    }
+
+    const char* name = console->desc->params->key;
+    // validate name charset
+    for(const char* p = name; *p; p++)
+    {
+        if(!(isalnum(*p) || *p=='_' || *p=='-'))
+        {
+            printError(console, "\ninvalid name (allowed: A-Za-z0-9_-)");
+            commandDone(console);
+            return;
+        }
+    }
+    if(strstr(name, ".."))
+    {
+        printError(console, "\ninvalid name contains '..'");
+        commandDone(console);
+        return;
+    }
+
+    tic_fs* fs = console->fs;
+
+    if(!tic_fs_exists(fs, "prepared_rocks"))
+    {
+        printError(console, "\nprepared_rocks directory missing");
+        commandDone(console);
+        return;
+    }
+
+    // ensure destination path exists (create chain)
+    if(tic_fs_makedir(fs, "rocks") || tic_fs_makedir(fs, "rocks/share") || tic_fs_makedir(fs, "rocks/share/lua") || tic_fs_makedir(fs, "rocks/share/lua/5.4"))
+    {
+        // ignore errors if already exists; only warn if deepest missing afterwards
+        if(!tic_fs_exists(fs, "rocks/share/lua/5.4"))
+        {
+            printError(console, "\nfailed to create destination tree");
+            commandDone(console);
+            return;
+        }
+    }
+
+    // navigate into prepared_rocks/<name>
+    tic_fs_changedir(fs, "prepared_rocks");
+    if(!tic_fs_isdir(fs, name))
+    {
+        printError(console, "\nrock not found under prepared_rocks");
+        tic_fs_dirback(fs);
+        commandDone(console);
+        return;
+    }
+    tic_fs_changedir(fs, name);
+
+    printBack(console, "\ninstalling rock: ");
+    printFront(console, name);
+    printLine(console);
+
+    InstallRockData data = { console, fs, name, 0 };
+    tic_fs_enum(fs, onInstallRockEnum, onInstallRockEnumDone, &data);
+}
+
 static void onGameMenuCommand(Console* console)
 {
     gotoMenu(console->studio);
@@ -3205,6 +3350,14 @@ static const char HelpUsage[] = "help [<text>"
         "Install demo carts to the current directory.",                                 \
         NULL,                                                                           \
         onInstallDemosCommand,                                                          \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("install",                                                                    \
+        NULL,                                                                           \
+        "Install pure Lua rock from prepared_rocks/<name> into rocks/share/lua/5.4.",   \
+        "install <name>",                                                              \
+        onInstallRockCommand,                                                           \
         NULL,                                                                           \
         NULL)                                                                           \
                                                                                         \
