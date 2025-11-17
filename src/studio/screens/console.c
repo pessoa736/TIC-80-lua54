@@ -40,6 +40,10 @@
 
 #include <ctype.h>
 #include <string.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <sys/wait.h>
+#include <dirent.h>
 
 #if !defined(__TIC_MACOSX__)
 #include <malloc.h>
@@ -1707,8 +1711,103 @@ static void onPathCommand(Console* console);
 static void onManifestCommand(Console* console);
 static void onDownloadCommand(Console* console);
 static void onDownloadRockCommand(Console* console);
+static void onLuarocksCommand(Console* console);
 // --- DOWNLOAD ROCK (.rock) from luarocks.org ---------------------------------------
-typedef struct DownloadRockCtx { Console* console; char name[64]; char version[64]; tic_net* net; } DownloadRockCtx;
+// Multi-stage flow: search module (if uploader unknown) -> open module page -> fetch .rock
+typedef enum { DR_STAGE_SEARCH, DR_STAGE_MODULE, DR_STAGE_ROCK } DownloadRockStage;
+typedef struct DownloadRockCtx { Console* console; char uploader[128]; char name[64]; char version[64]; char href[512]; tic_net* net; DownloadRockStage stage; int lastPct; } DownloadRockCtx;
+
+// naive version comparator: split by non-alnum ('.' '-' '_'), compare numeric segments numerically, otherwise lexicographically.
+static int cmp_version(const char* a, const char* b)
+{
+    if(!a||!b) return a?1:b?-1:0;
+    const char *pa=a, *pb=b; char sa[16], sb[16];
+    while(*pa || *pb)
+    {
+        int ia=0, ib=0; int na=0, nb=0; bool idan=true, idbn=true;
+        // extract segment from a
+        ia=0; while(pa[ia] && pa[ia]!='.' && pa[ia]!='-' && pa[ia]!='_') ia++; size_t la=ia< (int)sizeof(sa)-1 ? ia : (int)sizeof(sa)-1; memcpy(sa, pa, la); sa[la]=0; idan = la>0 && isdigit((unsigned char)sa[0]);
+        // extract segment from b
+        ib=0; while(pb[ib] && pb[ib]!='.' && pb[ib]!='-' && pb[ib]!='_') ib++; size_t lb=ib< (int)sizeof(sb)-1 ? ib : (int)sizeof(sb)-1; memcpy(sb, pb, lb); sb[lb]=0; idbn = lb>0 && isdigit((unsigned char)sb[0]);
+        if(idan && idbn){ na=atoi(sa); nb=atoi(sb); if(na!=nb) return na<nb?-1:1; }
+        else if(idan!=idbn) return idan?1:-1; // numeric considered greater than alpha segment
+        else { int r=strcmp(sa,sb); if(r) return r<0?-1:1; }
+        if(!pa[ia] && !pb[ib]) break; if(pa[ia]) pa+=ia+1; else pa+=ia; if(pb[ib]) pb+=ib+1; else pb+=ib;
+    }
+    // longer string considered greater if all equal
+    size_t la=strlen(a), lb=strlen(b); if(la==lb) return 0; return la<lb?-1:1;
+}
+
+// parse package HTML page searching for hrefs to name-version.rock; if desired!=NULL, pick that version; else highest.
+static bool resolve_rock_href(const char* name, const char* desired, const char* html, char* outVersion, size_t outVerSz, char* outHref, size_t outHrefSz)
+{
+    if(!name||!html||!outVersion||!outVerSz||!outHref||!outHrefSz) return false; outVersion[0]=0; outHref[0]=0;
+    size_t nameLen=strlen(name);
+    const char* p=html; char bestVer[64]={0}; char bestHref[512]={0};
+    while((p=strstr(p, name)))
+    {
+        // expect pattern name-<version>.rock
+        if(p>html && isalnum((unsigned char)p[-1])) { p+=nameLen; continue; } // part of larger token
+        const char* dash=p+nameLen; if(*dash!='-'){ p+=nameLen; continue; }
+        const char* verStart=dash+1; const char* dot=strstr(verStart, ".rock"); if(!dot){ p+=nameLen; continue; }
+        // ensure no '/' between verStart and dot
+        const char* slash=strchr(verStart, '/'); if(slash && slash<dot){ p+=nameLen; continue; }
+        // extract version substring (between verStart and dot)
+        size_t vlen=(size_t)(dot-verStart); if(vlen==0 || vlen>63){ p+=nameLen; continue; }
+        char cand[64]; memcpy(cand, verStart, vlen); cand[vlen]=0;
+        // basic validation: allow [A-Za-z0-9._-]
+        bool ok=true; for(size_t i=0;i<vlen;i++){ unsigned char c=cand[i]; if(!(isalnum(c)||c=='_'||c=='-'||c=='.')){ ok=false; break; } }
+        if(!ok){ p+=nameLen; continue; }
+        // find href="..." preceding the .rock within a small window
+        const char* searchStart = verStart - 200; if(searchStart < html) searchStart = html;
+        const char* hrefPos = NULL;
+        for(const char* q = dot; q > searchStart; q--){
+            if(q - 6 >= searchStart && (strncmp(q-6, "href=\"", 6)==0 || strncmp(q-6, "href='", 6)==0)) { hrefPos = q-6; break; }
+        }
+        char hrefBuf[512] = {0};
+        if(hrefPos){
+            char quote = hrefPos[5];
+            const char* start = hrefPos + 6;
+            const char* end = strchr(start, quote);
+            if(end && end > start){ size_t hlen = (size_t)(end - start); if(hlen >= sizeof(hrefBuf)) hlen = sizeof(hrefBuf)-1; memcpy(hrefBuf, start, hlen); hrefBuf[hlen]=0; }
+        }
+
+        if(desired && desired[0]){
+            if(strcmp(cand, desired)==0 && hrefBuf[0]){ strncpy(outVersion, cand, outVerSz-1); outVersion[outVerSz-1]=0; strncpy(outHref, hrefBuf, outHrefSz-1); outHref[outHrefSz-1]=0; return true; }
+        } else {
+            if(hrefBuf[0] && (bestVer[0]==0 || cmp_version(bestVer, cand)<0)) { strcpy(bestVer,cand); strcpy(bestHref, hrefBuf); }
+        }
+        p=verStart+vlen; // advance
+    }
+    if(!desired || !desired[0]){
+        if(bestVer[0] && bestHref[0]){ strncpy(outVersion,bestVer,outVerSz-1); outVersion[outVerSz-1]=0; strncpy(outHref,bestHref,outHrefSz-1); outHref[outHrefSz-1]=0; return true; }
+    }
+    return false;
+}
+
+// find first module page link: /modules/<uploader>/<name>
+static bool find_module_link(const char* name, const char* html, char* outUploader, size_t outUploaderSz)
+{
+    if(!name||!html||!outUploader||!outUploaderSz) return false; outUploader[0]=0;
+    const char* p = html;
+    const char* pat = "/modules/";
+    size_t nameLen = strlen(name);
+    while((p = strstr(p, pat)))
+    {
+        const char* upStart = p + strlen(pat);
+        const char* upEnd = strchr(upStart, '/'); if(!upEnd) { p += strlen(pat); continue; }
+        const char* nmStart = upEnd + 1;
+        if(strncmp(nmStart, name, nameLen)==0)
+        {
+            size_t ulen = (size_t)(upEnd - upStart); if(ulen == 0 || ulen >= outUploaderSz) { p += strlen(pat); continue; }
+            bool ok=true; for(size_t i=0;i<ulen;i++){ unsigned char c=upStart[i]; if(!(isalnum(c)||c=='_'||c=='-'||c=='.')){ ok=false; break; } }
+            if(!ok){ p += strlen(pat); continue; }
+            memcpy(outUploader, upStart, ulen); outUploader[ulen]=0; return true;
+        }
+        p = nmStart;
+    }
+    return false;
+}
 
 static void onDownloadRockGet(const net_get_data* data)
 {
@@ -1717,87 +1816,139 @@ static void onDownloadRockGet(const net_get_data* data)
     switch(data->type)
     {
     case net_get_progress:
-        printBack(console, ".");
+        if(data->progress.total > 0)
+        {
+            int pct = (int)((100.0 * (double)data->progress.size) / (double)data->progress.total);
+            if(pct >= ctx->lastPct + 10)
+            {
+                printBack(console, "\nprogress: ");
+                char num[16]; sprintf(num, "%d%%", pct); printFront(console, num);
+                ctx->lastPct = pct;
+            }
+        }
+        else
+        {
+            printBack(console, ".");
+        }
         break;
     case net_get_error:
-        printError(console, "\nrock download error code: ");
+        if(ctx->stage == DR_STAGE_SEARCH || ctx->stage == DR_STAGE_MODULE)
         {
-            char num[16]; sprintf(num, "%d", data->error.code); printFront(console, num);
+            printError(console, "\nfailed to resolve module/version (network error)");
+            commandDone(console);
+            free(ctx);
         }
-        printLine(console);
-        commandDone(console);
-        tic_net_close(ctx->net);
-        free(ctx);
+        else
+        {
+            printError(console, "\nrock download error code: ");
+            char num[16]; sprintf(num, "%d", data->error.code); printFront(console, num); printLine(console);
+            commandDone(console);
+            free(ctx);
+        }
         break;
     case net_get_done:
         {
-            // data->done.data is the .rock (zip). We'll scan entries and extract .lua + .rockspec.
-            // For simplicity, write temporary file then reopen with zip library.
-            tic_fs* fs = console->fs;
-            tic_fs_makedir(fs, "prepared_rocks");
-            tic_fs_changedir(fs, "prepared_rocks");
-            if(!tic_fs_isdir(fs, ctx->name)) tic_fs_makedir(fs, ctx->name);
-            tic_fs_changedir(fs, ctx->name);
-
-            const char* tmpName = "__tmp_download.rock";
-            tic_fs_save(fs, tmpName, data->done.data, data->done.size, false);
-
-            const char* zipPath = tic_fs_path(fs, tmpName);
-            struct zip_t* z = zip_open(zipPath, 0, 'r');
-            if(!z)
+            if(ctx->stage == DR_STAGE_SEARCH)
             {
-                printError(console, "\nfailed to open rock archive");
-            }
-            else
-            {
-                int entries = zip_total_entries(z);
-                for(int i = 0; i < entries; i++)
+                if(find_module_link(ctx->name, (const char*)data->done.data, ctx->uploader, sizeof ctx->uploader))
                 {
-                    if(zip_entry_openbyindex(z, i) != 0) continue;
-                    const char* zname = zip_entry_name(z);
-                    size_t zsize = zip_entry_size(z);
-                    if(zsize > 0 && zname)
-                    {
-                        const char* dot = strrchr(zname, '.');
-                        if(dot && (strcmp(dot, ".lua") == 0 || strcmp(dot, ".rockspec") == 0))
-                        {
-                            void* buf = NULL; size_t bufsz = 0;
-                            ssize_t readsz = zip_entry_read(z, &buf, &bufsz);
-                            if(readsz >= 0 && buf && bufsz > 0)
-                            {
-                                // Decide destination
-                                if(strcmp(dot, ".lua") == 0)
-                                {
-                                    if(!tic_fs_isdir(fs, "lua")) tic_fs_makedir(fs, "lua");
-                                    tic_fs_changedir(fs, "lua");
-                                    const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname;
-                                    tic_fs_save(fs, base, buf, (s32)bufsz, false);
-                                    tic_fs_dirback(fs);
-                                }
-                                else // .rockspec
-                                {
-                                    const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname;
-                                    tic_fs_save(fs, base, buf, (s32)bufsz, false);
-                                }
-                            }
-                            if(buf) free(buf);
-                        }
-                    }
-                    zip_entry_close(z);
+                    char modUrl[1024]; snprintf(modUrl, sizeof modUrl, "https://luarocks.org/modules/%s/%s", ctx->uploader, ctx->name);
+                    printBack(console, "\nmodule: "); printLink(console, modUrl); printLine(console);
+                    ctx->stage = DR_STAGE_MODULE;
+                    ctx->lastPct = -1;
+                    tic_net_get(ctx->net, modUrl, onDownloadRockGet, ctx);
+                    return;
                 }
-                zip_close(z);
+                printError(console, "\nmodule not found - try downloadrock <uploader>/<name> [version]");
+                commandDone(console);
+                free(ctx);
             }
-            // remove temp
-            tic_fs_delfile(fs, tmpName);
-
-            // restore back to root
-            tic_fs_dirback(fs); // out of <name>
-            tic_fs_dirback(fs); // out of prepared_rocks
-            printBack(console, "\nrock downloaded: "); printFront(console, ctx->name); printFront(console, "-"); printFront(console, ctx->version); printLine(console);
-            printBack(console, "run: install "); printFront(console, ctx->name); printBack(console, " to install");
-            commandDone(console);
-            tic_net_close(ctx->net);
-            free(ctx);
+            else if(ctx->stage == DR_STAGE_MODULE)
+            {
+                if(resolve_rock_href(ctx->name, ctx->version[0]?ctx->version:NULL, (const char*)data->done.data, ctx->version, sizeof ctx->version, ctx->href, sizeof ctx->href))
+                {
+                    printBack(console, "\nversion resolved: "); printFront(console, ctx->version); printLine(console);
+                    printBack(console, "href: "); printFront(console, ctx->href); printLine(console);
+                    ctx->stage = DR_STAGE_ROCK;
+                    char full[1024];
+                    if(strncmp(ctx->href, "http://", 7)==0 || strncmp(ctx->href, "https://", 8)==0) snprintf(full, sizeof full, "%s", ctx->href);
+                    else snprintf(full, sizeof full, "https://luarocks.org%s", ctx->href);
+                    printBack(console, "downloading rock "); printFront(console, ctx->name); printFront(console, "-"); printFront(console, ctx->version); printBack(console, " ...");
+                    printBack(console, "\nGET "); printLink(console, full); printLine(console);
+                    ctx->lastPct = -1;
+                    tic_net_get(ctx->net, full, onDownloadRockGet, ctx);
+                    return;
+                }
+                printError(console, "\nfailed to find any .rock link on module page");
+                commandDone(console);
+                free(ctx);
+            }
+            else // DR_STAGE_ROCK final extraction
+            {
+                // data->done.data is the .rock (zip). We'll scan entries and extract .lua + .rockspec.
+                tic_fs* fs = console->fs;
+                tic_fs_makedir(fs, "prepared_rocks");
+                tic_fs_changedir(fs, "prepared_rocks");
+                if(!tic_fs_isdir(fs, ctx->name)) tic_fs_makedir(fs, ctx->name);
+                tic_fs_changedir(fs, ctx->name);
+                const char* tmpName = "__tmp_download.rock";
+                tic_fs_save(fs, tmpName, data->done.data, data->done.size, false);
+                const char* zipPath = tic_fs_path(fs, tmpName);
+                struct zip_t* z = zip_open(zipPath, 0, 'r');
+                if(!z)
+                {
+                    printError(console, "\nfailed to open rock archive");
+                }
+                else
+                {
+                    int entries = zip_total_entries(z);
+                    for(int i = 0; i < entries; i++)
+                    {
+                        if(zip_entry_openbyindex(z, i) != 0) continue;
+                        const char* zname = zip_entry_name(z);
+                        size_t zsize = zip_entry_size(z);
+                        if(zsize > 0 && zname)
+                        {
+                            const char* dot = strrchr(zname, '.');
+                            if(dot && (strcmp(dot, ".lua") == 0 || strcmp(dot, ".rockspec") == 0))
+                            {
+                                void* buf = NULL; size_t bufsz = 0;
+                                ssize_t readsz = zip_entry_read(z, &buf, &bufsz);
+                                if(readsz >= 0 && buf && bufsz > 0)
+                                {
+                                    if(strcmp(dot, ".lua") == 0)
+                                    {
+                                        if(!tic_fs_isdir(fs, "lua")) tic_fs_makedir(fs, "lua");
+                                        tic_fs_changedir(fs, "lua");
+                                        const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname;
+                                        tic_fs_save(fs, base, buf, (s32)bufsz, false);
+                                        tic_fs_dirback(fs);
+                                    }
+                                    else
+                                    {
+                                        const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname;
+                                        tic_fs_save(fs, base, buf, (s32)bufsz, false);
+                                    }
+                                }
+                                if(buf) free(buf);
+                            }
+                        }
+                        zip_entry_close(z);
+                    }
+                    zip_close(z);
+                }
+                tic_fs_delfile(fs, tmpName);
+                tic_fs_dirback(fs); // out of <name>
+                tic_fs_dirback(fs); // out of prepared_rocks
+                printBack(console, "\nrock downloaded: "); printFront(console, ctx->name); printFront(console, "-"); printFront(console, ctx->version); printLine(console);
+                // report size and source URL
+                printBack(console, "bytes: ");
+                { char num[32]; sprintf(num, "%d", data->done.size); printFront(console, num); }
+                printBack(console, ", from: "); printLink(console, data->url); printLine(console);
+                printBack(console, "run: install "); printFront(console, ctx->name); printBack(console, " to install");
+                commandDone(console);
+                free(ctx);
+            }
         }
         break;
     }
@@ -1805,30 +1956,230 @@ static void onDownloadRockGet(const net_get_data* data)
 
 static void onDownloadRockCommand(Console* console)
 {
-    if(console->desc->count < 2)
+    if(console->desc->count < 1)
     {
-        printBack(console, "\nusage: downloadrock <name> <version>");
+        printBack(console, "\nusage: downloadrock <name>|<uploader>/<name> [version]");
         commandDone(console);
         return;
     }
-    const char* name = console->desc->params->key;
-    const char* version = console->desc->params[1].key; // second positional param
-    // basic validation
+    const char* raw = console->desc->params->key;
+    const char* slash = strchr(raw, '/');
+    char uploader[128] = {0};
+    char name[64] = {0};
+    if(slash){ size_t ulen = (size_t)(slash-raw); if(ulen >= sizeof(uploader)) ulen = sizeof(uploader)-1; memcpy(uploader, raw, ulen); uploader[ulen]=0; strncpy(name, slash+1, sizeof(name)-1); }
+    else { strncpy(name, raw, sizeof(name)-1); }
+    const char* version = (console->desc->count >= 2) ? console->desc->params[1].key : NULL;
     for(const char* p=name; *p; p++) if(!(isalnum(*p)||*p=='_'||*p=='-')) { printError(console, "\ninvalid name"); commandDone(console); return; }
-    for(const char* p=version; *p; p++) if(!(isalnum(*p)||*p=='_'||*p=='-'||*p=='.')) { printError(console, "\ninvalid version"); commandDone(console); return; }
+    if(uploader[0]) for(const char* p=uploader; *p; p++) if(!(isalnum(*p)||*p=='_'||*p=='-'||*p=='.')) { printError(console, "\ninvalid uploader"); commandDone(console); return; }
+    if(version) for(const char* p=version; *p; p++) if(!(isalnum(*p)||*p=='_'||*p=='-'||*p=='.')) { printError(console, "\ninvalid version"); commandDone(console); return; }
 
-    // construct URL path for luarocks.org (assumes file pattern name-version.rock)
-    char path[TICNAME_MAX]; snprintf(path, sizeof path, "/%s-%s.rock", name, version);
-    printBack(console, "\ndownloading rock "); printFront(console, name); printFront(console, "-"); printFront(console, version); printBack(console, " ...");
+#if !defined(__EMSCRIPTEN__) && !defined(_3DS)
+    // Prefer using LuaRocks CLI to avoid URL guessing
+    {
+        tic_fs* fs = console->fs;
+        // prepare working dir prepared_rocks/<name>
+        tic_fs_makedir(fs, "prepared_rocks");
+        tic_fs_changedir(fs, "prepared_rocks");
+        if(!tic_fs_isdir(fs, name)) tic_fs_makedir(fs, name);
+        tic_fs_changedir(fs, name);
+        const char* dirAbs = tic_fs_path(fs, "");
 
-    DownloadRockCtx* ctx = malloc(sizeof *ctx);
-    memset(ctx, 0, sizeof *ctx);
+        char cmd[2048];
+        if(version) snprintf(cmd, sizeof cmd, "cd '%s' && luarocks download --rock '%s' '%s' 2>&1", dirAbs, name, version);
+        else snprintf(cmd, sizeof cmd, "cd '%s' && luarocks download --rock '%s' 2>&1", dirAbs, name);
+        printBack(console, "\n$ "); printFront(console, cmd); printLine(console);
+        FILE* pipe = popen(cmd, "r");
+        if(pipe)
+        {
+            char line[512]; while(fgets(line, sizeof line, pipe)) printBack(console, line);
+            int status = pclose(pipe);
+            if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            {
+                // find downloaded .rock file
+                char chosen[256] = {0};
+                char verbuf[64] = {0};
+                if(version)
+                {
+                    const char* suffixes[] = {".rock", ".all.rock", ".src.rock"};
+                    for(size_t i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);i++){
+                        char fname[256]; snprintf(fname, sizeof fname, "%s-%s%s", name, version, suffixes[i]);
+                        const char* abs = tic_fs_path(fs, fname);
+                        FILE* f = fopen(abs, "rb"); if(f){ fclose(f); strncpy(chosen,fname,sizeof(chosen)-1); strncpy(verbuf,version,sizeof(verbuf)-1); break; }
+                    }
+                }
+                if(!chosen[0])
+                {
+                    // scan directory for best name-*.rock
+                    DIR* d = opendir(dirAbs);
+                    if(d){
+                        struct dirent* ent; while((ent=readdir(d))){
+                            const char* dn = ent->d_name;
+                            size_t nl = strlen(name);
+                            size_t dl = strlen(dn);
+                            if(dl>nl+6 && strncmp(dn,name,nl)==0 && dn[nl]=='-' && strstr(dn, ".rock"))
+                            {
+                                // extract version between name- and .rock
+                                const char* vstart = dn + nl + 1; const char* dot = strstr(vstart, ".rock"); if(!dot) continue; size_t vlen=(size_t)(dot-vstart); if(vlen==0||vlen>=64) continue; char cand[64]; memcpy(cand,vstart,vlen); cand[vlen]=0;
+                                if(!chosen[0] || cmp_version(verbuf, cand)<0){ strncpy(chosen,dn,sizeof(chosen)-1); strncpy(verbuf,cand,sizeof(verbuf)-1); }
+                            }
+                        }
+                        closedir(d);
+                    }
+                }
+
+                if(chosen[0])
+                {
+                    // Open rock and extract lua/rockspec files
+                    const char* rockAbs = tic_fs_path(fs, chosen);
+                    struct zip_t* z = zip_open(rockAbs, 0, 'r');
+                    if(!z){ printError(console, "\nfailed to open downloaded rock"); }
+                    else
+                    {
+                        int entries = zip_total_entries(z);
+                        for(int i = 0; i < entries; i++)
+                        {
+                            if(zip_entry_openbyindex(z, i) != 0) continue;
+                            const char* zname = zip_entry_name(z);
+                            size_t zsize = zip_entry_size(z);
+                            if(zsize > 0 && zname)
+                            {
+                                const char* dot = strrchr(zname, '.');
+                                if(dot && (strcmp(dot, ".lua") == 0 || strcmp(dot, ".rockspec") == 0))
+                                {
+                                    void* buf = NULL; size_t bufsz = 0; ssize_t readsz = zip_entry_read(z, &buf, &bufsz);
+                                    if(readsz >= 0 && buf && bufsz > 0)
+                                    {
+                                        if(strcmp(dot, ".lua") == 0){ if(!tic_fs_isdir(fs, "lua")) tic_fs_makedir(fs, "lua"); tic_fs_changedir(fs, "lua"); const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname; tic_fs_save(fs, base, buf, (s32)bufsz, false); tic_fs_dirback(fs); }
+                                        else { const char* slash = strrchr(zname, '/'); const char* base = slash ? slash + 1 : zname; tic_fs_save(fs, base, buf, (s32)bufsz, false); }
+                                    }
+                                    if(buf) free(buf);
+                                }
+                            }
+                            zip_entry_close(z);
+                        }
+                        zip_close(z);
+                    }
+                    // Go back to root
+                    tic_fs_dirback(fs); // out of <name>
+                    tic_fs_dirback(fs); // out of prepared_rocks
+                    printBack(console, "\nrock downloaded: "); printFront(console, name); printFront(console, "-"); printFront(console, verbuf); printLine(console);
+                    printBack(console, "run: install "); printFront(console, name); printBack(console, " to install");
+                    commandDone(console);
+                    return;
+                }
+                else
+                {
+                    printError(console, "\nluarocks download succeeded but .rock file not found");
+                }
+            }
+            else
+            {
+                printError(console, "\nluarocks download failed; falling back to web resolver");
+            }
+        }
+        else
+        {
+            printError(console, "\nfailed to start luarocks (is it installed?)");
+        }
+        // restore directory if not returned earlier
+        tic_fs_dirback(fs);
+        tic_fs_dirback(fs);
+    }
+#endif
+
+    DownloadRockCtx* ctx = malloc(sizeof *ctx); if(!ctx){ printError(console, "\nOOM"); commandDone(console); return; }
+    memset(ctx,0,sizeof *ctx);
     ctx->console = console;
     strncpy(ctx->name, name, sizeof ctx->name - 1);
-    strncpy(ctx->version, version, sizeof ctx->version - 1);
-    ctx->net = tic_net_create("https://luarocks.org");
-    if(!ctx->net){ printError(console, "\nnetwork init failed"); free(ctx); commandDone(console); return; }
-    tic_net_get(ctx->net, path, onDownloadRockGet, ctx);
+    if(uploader[0]) strncpy(ctx->uploader, uploader, sizeof ctx->uploader - 1);
+    ctx->net = console->net;
+    if(version) strncpy(ctx->version, version, sizeof ctx->version - 1);
+
+    if(ctx->uploader[0])
+    {
+        ctx->stage = DR_STAGE_MODULE;
+        printBack(console, "\nresolving version for "); printFront(console, name); if(version){ printBack(console, " (target "); printFront(console, version); printBack(console, ")"); } printBack(console, " ...");
+        char modUrl[1024]; snprintf(modUrl, sizeof modUrl, "https://luarocks.org/modules/%s/%s", ctx->uploader, ctx->name);
+        printBack(console, "\nGET "); printLink(console, modUrl); printLine(console);
+        ctx->lastPct = -1;
+        tic_net_get(ctx->net, modUrl, onDownloadRockGet, ctx);
+    }
+    else
+    {
+        ctx->stage = DR_STAGE_SEARCH;
+        printBack(console, "\nresolving module for "); printFront(console, name); printBack(console, " ...");
+        char sUrl[1024]; snprintf(sUrl, sizeof sUrl, "https://luarocks.org/search?q=%s", name);
+        printBack(console, "\nGET "); printLink(console, sUrl); printLine(console);
+        ctx->lastPct = -1;
+        tic_net_get(ctx->net, sUrl, onDownloadRockGet, ctx);
+    }
+}
+
+// --- LUAROCKS CLI BRIDGE -----------------------------------------------------------
+static void onLuarocksCommand(Console* console)
+{
+#if defined(__EMSCRIPTEN__) || defined(_3DS)
+    printError(console, "\nluarocks CLI not available on this platform");
+    commandDone(console);
+    return;
+#else
+    if(console->desc->count < 1)
+    {
+        printBack(console, "\nusage: luarocks install <name> [version]");
+        commandDone(console);
+        return;
+    }
+    const char* sub = console->desc->params->key;
+    if(strcmp(sub, "install") != 0)
+    {
+        printError(console, "\nonly 'install' is supported");
+        commandDone(console);
+        return;
+    }
+    if(console->desc->count < 2)
+    {
+        printBack(console, "\nusage: luarocks install <name> [version]");
+        commandDone(console);
+        return;
+    }
+    const char* name = console->desc->params[1].key;
+    const char* version = (console->desc->count >= 3) ? console->desc->params[2].key : NULL;
+
+    // Ensure local tree exists
+    tic_fs* fs = console->fs;
+    tic_fs_makedir(fs, "rocks");
+    const char* root = tic_fs_pathroot(fs, "rocks");
+
+    // Build command
+    char cmd[2048];
+    if(version)
+        snprintf(cmd, sizeof cmd, "luarocks install --lua-version=5.4 --tree='%s' '%s' '%s' 2>&1", root, name, version);
+    else
+        snprintf(cmd, sizeof cmd, "luarocks install --lua-version=5.4 --tree='%s' '%s' 2>&1", root, name);
+
+    printBack(console, "\n$ "); printFront(console, cmd); printLine(console);
+
+    FILE* pipe = popen(cmd, "r");
+    if(!pipe){ printError(console, "\nfailed to start luarocks (is it installed?)"); commandDone(console); return; }
+    char buf[512];
+    while(fgets(buf, sizeof buf, pipe))
+    {
+        // print streamed output
+        printBack(console, buf);
+    }
+    int status = pclose(pipe);
+    if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+    {
+        printBack(console, "\ninstalled into tree: "); printFront(console, root); printLine(console);
+    }
+    else
+    {
+        char num[32]; sprintf(num, "%d", status);
+        printError(console, "\nluarocks failed, status: "); printFront(console, num); printLine(console);
+    }
+    commandDone(console);
+    return;
+#endif
 }
 
 // INSTALL <name>
@@ -3905,9 +4256,17 @@ static const char HelpUsage[] = "help [<text>"
                                                                                         \
     macro("downloadrock",                                                              \
         NULL,                                                                           \
-        "Fetch <name>-<version>.rock from luarocks.org and unpack pure Lua files.",    \
-        "downloadrock <name> <version>",                                               \
+        "Download a rock and unpack pure-Lua files. If version is omitted, resolves the latest automatically. On desktop, will try `luarocks download --rock` first (if the CLI is available), falling back to a web resolver.",    \
+        "downloadrock <name>|<uploader>/<name> [version]",                                               \
         onDownloadRockCommand,                                                          \
+        NULL,                                                                           \
+        NULL)                                                                           \
+                                                                                        \
+    macro("luarocks",                                                                  \
+        NULL,                                                                           \
+        "Install pure-Lua rocks using the system LuaRocks CLI (desktop only). Requires `luarocks` in PATH. Installs to ./rocks so `require` works out of the box.",                \
+        "luarocks install <name> [version]",                                           \
+        onLuarocksCommand,                                                              \
         NULL,                                                                           \
         NULL)                                                                           \
                                                                                         \

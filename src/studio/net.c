@@ -404,21 +404,26 @@ JNIEnv *Android_JNI_GetEnv();
 
 tic_net* tic_net_create(const char* host)
 {
+    // naettInit must be called only once, guard with static flag
+    static bool naett_inited = false;
 #if defined(__ANDROID__)
-    JNIEnv *env = Android_JNI_GetEnv();
-    JavaVM *vm = NULL;
-    (*env)->GetJavaVM(env, &vm);
-
-    naettInit(vm);
+    if(!naett_inited){
+        JNIEnv *env = Android_JNI_GetEnv();
+        JavaVM *vm = NULL;
+        (*env)->GetJavaVM(env, &vm);
+        naettInit(vm);
+        naett_inited = true;
+    }
 #else
-    naettInit(NULL);
+    if(!naett_inited){
+        naettInit(NULL);
+        naett_inited = true;
+    }
 #endif
 
     tic_net* net = NEW(tic_net);
     memset(net, 0, sizeof(tic_net));
-
     strcpy(net->host, host);
-
     return net;
 }
 
@@ -426,8 +431,16 @@ void tic_net_get(tic_net* net, const char* url, net_get_callback callback, void*
 {
     HttpGet* get = NEW(HttpGet);
     memset(get, 0, sizeof *get);
-
-    sprintf(get->url, "%s%s", net->host, url);
+    // Support absolute URLs: if url starts with http:// or https://, use as-is
+    if((strncmp(url, "http://", 7) == 0) || (strncmp(url, "https://", 8) == 0))
+    {
+        strncpy(get->url, url, sizeof(get->url) - 1);
+        get->url[sizeof(get->url) - 1] = '\0';
+    }
+    else
+    {
+        snprintf(get->url, sizeof(get->url), "%s%s", net->host, url);
+    }
 
     get->req = naettRequest(get->url, naettMethod("GET"), naettHeader("accept", "*/*"));
     get->res = naettMake(get->req);

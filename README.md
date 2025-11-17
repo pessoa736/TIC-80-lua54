@@ -38,14 +38,67 @@ Notes:
 - Paths added: `./?.lua`, `./?/init.lua`, `./rocks/share/lua/5.4/?.lua`, `./rocks/share/lua/5.4/?/init.lua`.
 - If a rock is not found, normal TIC-80 error reporting applies.
 - Embedded stub: a minimal `luarocks.loader` is vendored under `vendor/luarocks_stub/` so `require('luarocks.loader')` never hard-fails even without copying the full runtime. It does NOT implement install/search logic.
-- Installer stub `tic_luarocks.lua` documents the future offline API but real installation from inside TIC-80 is currently disabled (no file I/O or rockspec parsing yet).
 
-#### Planned (Not Yet Implemented)
-- Offline installation command now available: `install <name>` (console) copies top-level `.lua` files from `prepared_rocks/<name>/` into `rocks/share/lua/5.4/` without overwriting existing files.
-- Project scaffolding: `project <name>` creates directory structure and starter `main.lua`.
-- Future enhancement: recursive directory copy & manifest for uninstall.
-- Optional manifest for uninstall (expanded tracking for installed rocks).
-- Security hardening: strict relative path checks, deny `..`, only allow `.lua` content.
+#### LuaRocks from TIC-80 console (Desktop)
+
+On desktop platforms, TIC-80 exposes two convenient console flows to add pure-Lua rocks to your local tree.
+
+- Use the system LuaRocks CLI directly from the console (preferred):
+  - Requires `luarocks` installed and available in your PATH on the host OS.
+  - Installs into the local tree used by TIC-80: `./rocks`.
+  - Usage inside TIC-80 console:
+
+    ```
+    luarocks install <name> [version]
+    ```
+
+    Examples:
+
+    ```
+    luarocks install inspect
+    luarocks install loglua 1.0-5
+    ```
+
+  - After installation, `require("<name>")` works immediately in your cart code.
+
+- Pure web flow (no CLI needed):
+  - Download a `.rock` and unpack only `.lua` and `.rockspec` files into `./prepared_rocks/<name>/`:
+
+    ```
+    downloadrock <name>|<uploader>/<name> [version]
+    ```
+
+    - If `version` is omitted, the latest version is resolved automatically.
+    - If only `<name>` is provided, the uploader is discovered via luarocks.org search.
+
+  - Install unpacked files into the local tree:
+
+    ```
+    install <name>
+    ```
+
+  - This flow only handles pure-Lua content; native/C modules are intentionally ignored.
+
+Where things go:
+- CLI install tree: `./rocks/share/lua/5.4/<package>/...`
+- Web flow staging dir: `./prepared_rocks/<package>/...`
+- `package.path` includes both locations out of the box.
+
+Limitations:
+- Desktop-only for the CLI bridge. The web flow works where HTTP access is enabled.
+- Only pure-Lua rocks are supported.
+
+#### Console commands quick reference
+- `luarocks install <name> [version]` — install via system LuaRocks into `./rocks` (desktop only)
+- `downloadrock <name>|<uploader>/<name> [version]` — fetch and unpack a `.rock` (latest if version omitted)
+- `install <name>` — copy unpacked Lua files from `prepared_rocks/<name>/` into `./rocks/share/lua/5.4/`
+- `rockspec <name>` — show basic info parsed from the unpacked rockspec
+- `manifest` — list installed packages and versions in the local tree
+- `search <text>` — search luarocks.org from the console
+
+Planned enhancements:
+- Recursive directory copy & uninstall manifest improvements
+- More robust version listing and selection from module pages
 
 See demo cart: `demos/luarocksdemo.lua`.
 
