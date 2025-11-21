@@ -14,6 +14,7 @@ set(TIC80STUDIO_SRC
     ${TIC80LIB_DIR}/ext/md5.c
     ${TIC80LIB_DIR}/ext/json.c
     ${TIC80LIB_DIR}/ext/png.c
+    ${TIC80LIB_DIR}/studio/project.c
 )
 
 if(BUILD_EDITORS)
@@ -32,10 +33,7 @@ if(BUILD_EDITORS)
     )
 endif()
 
-if(BUILD_PRO)
-    set(TIC80STUDIO_SRC ${TIC80STUDIO_SRC}
-        ${TIC80LIB_DIR}/studio/project.c)
-endif()
+## Always include project.c so text project (.lua, .js, etc.) load/save works in all builds
 
 set(TIC80_OUTPUT tic80)
 

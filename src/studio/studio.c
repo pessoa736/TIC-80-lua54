@@ -1931,11 +1931,7 @@ static void processShortcuts(Studio* studio)
             switch(studio->mode)
             {
             case TIC_MENU_MODE:
-                showGameMenu(studio)
-                    ? studio_menu_back(studio->menu)
-                    : setStudioMode(studio, studio->prevMode == TIC_RUN_MODE
-                        ? TIC_CONSOLE_MODE
-                        : studio->prevMode);
+                studio_menu_back(studio->menu);
                 break;
             case TIC_RUN_MODE:
                 showGameMenu(studio)
@@ -1953,6 +1949,7 @@ static void processShortcuts(Studio* studio)
                     studio->code->escape(studio->code);
                     return;
                 }
+                /* fallthrough */
             default:
                 setStudioMode(studio, TIC_CONSOLE_MODE);
             }
