@@ -10,6 +10,7 @@ Key differences in this fork:
 
 - The engine uses Lua 5.4 while keeping the rest of the project compatible.
 - The standard Lua 'os' library is enabled (os.* available inside carts).
+- The standard Lua 'io' library is enabled (io.* available inside carts).
 - Support for importing `.lua` files located in the same directory as the cart under development. These files are bundled into the cart during the build process and compiled together into a single build.
 - Optional LuaRocks support for pure Lua modules: place rocks under `./rocks/share/lua/5.4` and they become available to `require`. If the LuaRocks runtime Lua modules are present, `luarocks.loader` is auto-required.
 - Full respect for the original project: credits, MIT license, and base structure are preserved. Changes are minimal and isolated to enable Lua 5.4 and the unified build of Lua scripts.

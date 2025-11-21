@@ -1621,6 +1621,8 @@ void luaapi_open(lua_State *lua)
         { LUA_MATHLIBNAME, luaopen_math },
         // Enable OS standard library per request
         { LUA_OSLIBNAME, luaopen_os },
+        // Enable IO standard library per request
+        { LUA_IOLIBNAME, luaopen_io },
         { LUA_DBLIBNAME, luaopen_debug },
         { NULL, NULL }
     };
