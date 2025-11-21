@@ -12,18 +12,20 @@ Key differences in this fork:
 - The standard Lua 'os' library is enabled (os.* available inside carts).
 - The standard Lua 'io' library is enabled (io.* available inside carts).
 - Support for importing `.lua` files located in the same directory as the cart under development. These files are bundled into the cart during the build process and compiled together into a single build.
-- Optional LuaRocks support for pure Lua modules: place rocks under `./rocks/share/lua/5.4` (relative ao projeto atual) e elas ficam disponíveis via `require`. Se os módulos Lua puros do LuaRocks estiverem presentes, `luarocks.loader` é carregado automaticamente.
+- Optional LuaRocks support for pure Lua modules: place rocks under `./rocks/share/lua/5.4` (relative to the current project) and they become available via `require`. If the LuaRocks pure-Lua runtime is present, `luarocks.loader` is auto-required.
 - Full respect for the original project: credits, MIT license, and base structure are preserved. Changes are minimal and isolated to enable Lua 5.4 and the unified build of Lua scripts.
 
 ### LuaRocks Integration (Fork Feature)
 
+Read this in Portuguese-BR: [README.pt-BR.md](README.pt-BR.md)
+
 You can use [LuaRocks](https://luarocks.org) to manage additional pure-Lua dependencies in your TIC-80 projects.
 
-1. Crie uma árvore local dentro do seu projeto atual (ou próxima ao executável):
+1. Create a local tree inside your current project (or next to the executable):
   ```bash
   mkdir -p rocks/share/lua/5.4
   ```
-2. Instale as rocks nessa árvore usando o LuaRocks do sistema, apontando para `./rocks` (dentro do projeto atual):
+2. Install rocks into that tree using the system LuaRocks, pointing the tree to `./rocks` (inside the current project):
   ```bash
   luarocks install inspect --tree=./rocks
   ```
@@ -37,33 +39,33 @@ You can use [LuaRocks](https://luarocks.org) to manage additional pure-Lua depen
 
 Notes:
 - Only pure Lua rocks are supported (no native `.so` / C modules) to preserve the sandbox.
-- Caminhos adicionados: `./?.lua`, `./?/init.lua`, `./rocks/share/lua/5.4/?.lua`, `./rocks/share/lua/5.4/?/init.lua` (sempre relativos ao diretório de trabalho/projeto atual do console).
+- Paths added: `./?.lua`, `./?/init.lua`, `./rocks/share/lua/5.4/?.lua`, `./rocks/share/lua/5.4/?/init.lua` (always relative to the console working directory/current project).
 - If a rock is not found, normal TIC-80 error reporting applies.
 - Embedded stub: a minimal `luarocks.loader` is vendored under `vendor/luarocks_stub/` so `require('luarocks.loader')` never hard-fails even without copying the full runtime. It does NOT implement install/search logic.
 
-#### Projects e instalação por projeto
+#### Projects and per-project installs
 
-Crie um projeto com o comando do console:
+Create a project from the console:
 
 ```
 project <nome>
 ```
 
-Isso cria e entra em `<nome>/` com a seguinte estrutura:
+This creates and enters `<name>/` with:
 
 - `<nome>/main.lua`
 - `<nome>/prepared_rocks/`
 - `<nome>/rocks/share/lua/5.4/`
 
-Todas as instalações feitas via `luarocks install ...` passam a usar `./rocks` relativo ao diretório do projeto atual. Assim cada projeto possui sua própria árvore de dependências e `require` funciona isoladamente por projeto.
+All installations performed via `luarocks install ...` will use `./rocks` relative to the current project directory. Each project has its own dependency tree and `require` works per-project.
 
 #### LuaRocks from TIC-80 console (Desktop)
 
 On desktop platforms, TIC-80 exposes two convenient console flows to add pure-Lua rocks to your local tree.
 
 - Use the system LuaRocks CLI directly from the console (preferred):
-  - Requires `luarocks` instalado e disponível no PATH do seu sistema.
-  - Instala na árvore do projeto atual: `./rocks` (dentro do diretório do projeto).
+  - Requires `luarocks` installed and available in your system PATH.
+  - Installs into the current project's tree: `./rocks` (inside the project directory).
   - Usage inside TIC-80 console:
 
     ```
@@ -98,7 +100,7 @@ On desktop platforms, TIC-80 exposes two convenient console flows to add pure-Lu
   - This flow only handles pure-Lua content; native/C modules are intentionally ignored.
 
 Where things go:
-- Árvore de instalação da CLI (no projeto atual): `./rocks/share/lua/5.4/<package>/...`
+- CLI install tree (current project): `./rocks/share/lua/5.4/<package>/...`
 - Web flow staging dir: `./prepared_rocks/<package>/...`
 - `package.path` includes both locations out of the box.
 
@@ -107,7 +109,7 @@ Limitations:
 - Only pure-Lua rocks are supported.
 
 #### Console commands quick reference
-- `luarocks install <name> [version]` — instala via LuaRocks do sistema em `./rocks` do projeto atual (desktop apenas)
+- `luarocks install <name> [version]` — install via system LuaRocks into the current project's `./rocks` (desktop only)
 - `downloadrock <name>|<uploader>/<name> [version]` — fetch and unpack a `.rock` (latest if version omitted)
 - `install <name>` — copy unpacked Lua files from `prepared_rocks/<name>/` into `./rocks/share/lua/5.4/`
 - `rockspec <name>` — show basic info parsed from the unpacked rockspec
