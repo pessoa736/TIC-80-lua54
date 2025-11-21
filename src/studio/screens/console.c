@@ -2148,7 +2148,9 @@ static void onLuarocksCommand(Console* console)
     // Ensure local tree exists
     tic_fs* fs = console->fs;
     tic_fs_makedir(fs, "rocks");
-    const char* root = tic_fs_pathroot(fs, "rocks");
+    // Use path() so the tree resolves inside the current project (work dir),
+    // not at the global TIC-80 root directory.
+    const char* root = tic_fs_path(fs, "rocks");
 
     // Build command
     char cmd[2048];
