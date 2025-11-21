@@ -14,6 +14,7 @@ Key differences in this fork:
 - Support for importing `.lua` files located in the same directory as the cart under development. These files are bundled into the cart during the build process and compiled together into a single build.
 - Optional LuaRocks support for pure Lua modules: place rocks under `./rocks/share/lua/5.4` (relative to the current project) and they become available via `require`. If the LuaRocks pure-Lua runtime is present, `luarocks.loader` is auto-required.
 - Full respect for the original project: credits, MIT license, and base structure are preserved. Changes are minimal and isolated to enable Lua 5.4 and the unified build of Lua scripts.
+- Text project save/load (.lua and other text script formats) is enabled in all builds (no PRO required in this fork).
 
 ### LuaRocks Integration (Fork Feature)
 
@@ -199,7 +200,7 @@ This version has a few additional features and binaries can only be downloaded o
 For users who can't afford the program can easily build the pro version from the source code using `cmake .. -DBUILD_PRO=On` command.
 
 ## Pro Features
-- Save/load cartridges in text format, and create your game in any editor you want, also useful for version control systems.
+- Save/load cartridges in text format, and create your game in any editor you want, also useful for version control systems. (Note: in this fork, text format save/load is available in all builds.)
 - Even more memory banks: instead of having only 1 memory bank you have 8.
 - Export your game without editors, and then publish it to app stores.
 

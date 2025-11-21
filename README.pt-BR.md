@@ -12,6 +12,7 @@ Diferenças principais neste fork:
 - A biblioteca padrão `io` do Lua está habilitada (io.* disponível nos carts).
 - Suporte a importação de arquivos `.lua` no mesmo diretório do cart em desenvolvimento.
 - Integração com LuaRocks para módulos puros em Lua, com instalação por projeto (árvore de dependências fica em `./rocks` dentro do projeto).
+ - Save/load de projeto em texto (.lua e outros formatos de script) habilitado em todas as builds (não requer PRO neste fork).
 
 ## Integração com LuaRocks
 
